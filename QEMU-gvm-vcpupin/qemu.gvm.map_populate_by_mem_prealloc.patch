@@ -1,0 +1,65 @@
+diff --git a/include/qemu/mmap-alloc.h b/include/qemu/mmap-alloc.h
+index 933c024..2013ca9 100644
+--- a/include/qemu/mmap-alloc.h
++++ b/include/qemu/mmap-alloc.h
+@@ -5,6 +5,8 @@
+ 
+ size_t qemu_fd_getpagesize(int fd);
+ 
++extern int qemu_ram_mmap_populate;
++
+ void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared);
+ 
+ void qemu_ram_munmap(void *ptr, size_t size);
+diff --git a/util/mmap-alloc.c b/util/mmap-alloc.c
+index 5a85aa3..5970701 100644
+--- a/util/mmap-alloc.c
++++ b/util/mmap-alloc.c
+@@ -19,6 +19,8 @@
+ #include <sys/vfs.h>
+ #endif
+ 
++int qemu_ram_mmap_populate = 0;
++
+ size_t qemu_fd_getpagesize(int fd)
+ {
+ #ifdef CONFIG_LINUX
+@@ -64,7 +66,7 @@ void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared)
+     size_t offset = QEMU_ALIGN_UP((uintptr_t)ptr, align) - (uintptr_t)ptr;
+     void *ptr1;
+ 
+-    if (ptr == MAP_FAILED) {
++     if (ptr == MAP_FAILED) {
+         return MAP_FAILED;
+     }
+ 
+@@ -76,7 +78,8 @@ void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared)
+     ptr1 = mmap(ptr + offset, size, PROT_READ | PROT_WRITE,
+                 MAP_FIXED |
+                 (fd == -1 ? MAP_ANONYMOUS : 0) |
+-                (shared ? MAP_SHARED : MAP_PRIVATE),
++                (shared ? MAP_SHARED : MAP_PRIVATE) |
++				(qemu_ram_mmap_populate ? MAP_POPULATE : 0),
+                 fd, 0);
+     if (ptr1 == MAP_FAILED) {
+         munmap(ptr, total);
+diff --git a/vl.c b/vl.c
+index c15bc6d..32f00cf 100644
+--- a/vl.c
++++ b/vl.c
+@@ -26,6 +26,7 @@
+ #include "qemu/cutils.h"
+ #include "qemu/help_option.h"
+ #include "qemu/uuid.h"
++#include "qemu/mmap-alloc.h"
+ 
+ #ifdef CONFIG_SECCOMP
+ #include "sysemu/seccomp.h"
+@@ -3450,6 +3451,7 @@ int main(int argc, char **argv, char **envp)
+                 break;
+             case QEMU_OPTION_mem_prealloc:
+                 mem_prealloc = 1;
++				qemu_ram_mmap_populate = 1;
+                 break;
+             case QEMU_OPTION_d:
+                 log_mask = optarg;
