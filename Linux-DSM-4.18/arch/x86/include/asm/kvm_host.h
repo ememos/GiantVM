@@ -741,7 +741,7 @@ extern bool kvm_dsm_dbg_verbose;
 
 #ifdef USE_KTCP_NETWORK
         #include "ktcp.h"
-        typedef struct socket kconnection_t;
+        typedef struct ktcp_cb kconnection_t;
 #endif
 
 #ifdef USE_KRDMA_NETWORK
