@@ -104,7 +104,20 @@ config KVM_DSM
 	  Provide support for distributed software memory inside KVM, which allows
 	  userspace to implement distributed hypervisors.
 
+choice
+	prompt "Choose DSM Network protocol"
+	default KRDMA_NETWORK
+	depends on KVM_DSM
+	help
+	   This option allows to select a DSM network protocol.
 
+config KRDMA_NETWORK
+	bool "RDMA"
+
+config KTCP_NETWORK
+	bool "KTCP"
+
+endchoice
 # OK, it's a little counter-intuitive to do this, but it puts it neatly under
 # the virtualization menu.
 source drivers/vhost/Kconfig
