@@ -570,7 +570,7 @@ static int kvm_dsm_init(struct kvm *kvm, struct kvm_dsm_params *params)
 	}
 #endif
 
-#ifdef USE_KTCP_NETWORK
+#ifdef CONFIG_KTCP_NETWORK
 	network_ops.send = ktcp_send;
 	network_ops.receive = ktcp_receive;
 	network_ops.connect = ktcp_connect;
@@ -580,7 +580,7 @@ static int kvm_dsm_init(struct kvm *kvm, struct kvm_dsm_params *params)
 	dsm_debug("%s: kvm %d use TCP connection\n", __func__, params->dsm_id);
 #endif
 
-#ifdef USE_KRDMA_NETWORK
+#ifdef CONFIG_KRDMA_NETWORK
 	network_ops.send = krdma_send;
 	network_ops.receive = krdma_receive;
 	network_ops.connect = krdma_connect;
