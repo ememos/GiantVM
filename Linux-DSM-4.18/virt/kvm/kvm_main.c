@@ -289,6 +289,16 @@ int kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
 {
 	struct page *page;
 	int r;
+	char from_comm[TASK_COMM_LEN];
+
+	/*
+	 * task_set_comm is not defined? This code snippet is equivalent to
+	 * set_task_comm but tracing functions.
+	 */
+	sprintf(from_comm, "qemu-vcpu/%d", id);
+	task_lock(current);
+	strlcpy(current->comm, from_comm, sizeof(current->comm));
+	task_unlock(current);
 
 	mutex_init(&vcpu->mutex);
 	vcpu->cpu = -1;
@@ -1721,7 +1731,7 @@ static int next_segment(unsigned long len, int offset)
 		return len;
 }
 
-static int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
+int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
 				 void *data, int offset, int len)
 {
 	int r;
@@ -1833,7 +1843,7 @@ int kvm_vcpu_read_guest_atomic(struct kvm_vcpu *vcpu, gpa_t gpa,
 }
 EXPORT_SYMBOL_GPL(kvm_vcpu_read_guest_atomic);
 
-static int __kvm_write_guest_page(struct kvm_memory_slot *memslot, gfn_t gfn,
+int __kvm_write_guest_page(struct kvm_memory_slot *memslot, gfn_t gfn,
 			          const void *data, int offset, int len)
 {
 	int r;

@@ -42,6 +42,7 @@
 #include "x86.h"
 #include "cpuid.h"
 #include "hyperv.h"
+#include "dsm.h"
 
 #ifndef CONFIG_X86_64
 #define mod_64(x, y) ((x) - (y) * div64_u64(x, y))
@@ -549,16 +550,32 @@ int kvm_apic_set_irq(struct kvm_vcpu *vcpu, struct kvm_lapic_irq *irq,
 
 static int pv_eoi_put_user(struct kvm_vcpu *vcpu, u8 val)
 {
-
-	return kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.pv_eoi.data, &val,
-				      sizeof(val));
+	struct kvm_memory_slot *slot;
+	gfn_t gfn = vcpu->arch.pv_eoi.data.gpa >> PAGE_SHIFT;
+	int ret;
+	
+	ret = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, true);
+	if (ret < 0)
+		return ret;
+	ret = kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.pv_eoi.data, &val,
+			              sizeof(val));
+	kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
+	return ret;
 }
 
 static int pv_eoi_get_user(struct kvm_vcpu *vcpu, u8 *val)
 {
+	struct kvm_memory_slot *slot;
+	gfn_t gfn = vcpu->arch.pv_eoi.data.gpa >> PAGE_SHIFT;
+	int ret;
 
-	return kvm_read_guest_cached(vcpu->kvm, &vcpu->arch.pv_eoi.data, val,
-				      sizeof(*val));
+	ret = kvm_dsm_vcpu_acquire_page(vcpu, &slot, gfn, true);
+	if (ret < 0)
+		return ret;
+	ret = kvm_read_guest_cached(vcpu->kvm, &vcpu->arch.pv_eoi.data, val,
+                                     sizeof(*val));
+	kvm_dsm_vcpu_release_page(vcpu, slot, gfn);
+	return ret;
 }
 
 static inline bool pv_eoi_enabled(struct kvm_vcpu *vcpu)
@@ -2415,6 +2432,7 @@ static void apic_sync_pv_eoi_from_guest(struct kvm_vcpu *vcpu,
 
 void kvm_lapic_sync_from_vapic(struct kvm_vcpu *vcpu)
 {
+	struct kvm_memslots *slots;
 	u32 data;
 
 	if (test_bit(KVM_APIC_PV_EOI_PENDING, &vcpu->arch.apic_attention))
@@ -2423,11 +2441,18 @@ void kvm_lapic_sync_from_vapic(struct kvm_vcpu *vcpu)
 	if (!test_bit(KVM_APIC_CHECK_VAPIC, &vcpu->arch.apic_attention))
 		return;
 
-	if (kvm_read_guest_cached(vcpu->kvm, &vcpu->arch.apic->vapic_cache, &data,
-				  sizeof(u32)))
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.apic->vapic_cache.gpa,
+				  sizeof(u32), false) < 0)
 		return;
 
+	if (kvm_read_guest_cached(vcpu->kvm, &vcpu->arch.apic->vapic_cache, &data,
+				  sizeof(u32)))
+		goto out;
+
 	apic_set_tpr(vcpu->arch.apic, data & 0xff);
+out:
+	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.apic->vapic_cache.gpa,
+				sizeof(u32));
 }
 
 /*
@@ -2461,6 +2486,7 @@ void kvm_lapic_sync_to_vapic(struct kvm_vcpu *vcpu)
 	u32 data, tpr;
 	int max_irr, max_isr;
 	struct kvm_lapic *apic = vcpu->arch.apic;
+	struct kvm_memslots *slots;
 
 	apic_sync_pv_eoi_to_guest(vcpu, apic);
 
@@ -2476,8 +2502,13 @@ void kvm_lapic_sync_to_vapic(struct kvm_vcpu *vcpu)
 		max_isr = 0;
 	data = (tpr & 0xff) | ((max_isr & 0xf0) << 8) | (max_irr << 24);
 
+	if (kvm_dsm_vcpu_acquire(vcpu, &slots, vcpu->arch.apic->vapic_cache.gpa,
+				sizeof(u32), true) < 0)
+		return;
 	kvm_write_guest_cached(vcpu->kvm, &vcpu->arch.apic->vapic_cache, &data,
 				sizeof(u32));
+	kvm_dsm_vcpu_release(vcpu, slots, vcpu->arch.apic->vapic_cache.gpa,
+		                sizeof(u32));	 
 }
 
 int kvm_lapic_set_vapic_addr(struct kvm_vcpu *vcpu, gpa_t vapic_addr)
