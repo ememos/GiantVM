@@ -388,6 +388,7 @@ static void qemu_io_router_thread_run_rdma(void)
 static void connect_io_router_rdma(void)
 {
     struct router_address addr;
+    QEMUFile* f;
     int ret;
     int i = 0;
     int done = 0;
@@ -403,17 +404,29 @@ static void connect_io_router_rdma(void)
             printf("get_router_address failed, ret: %d\n", ret);
             return;
         }
-        req_files[i] = qemu_rdma_build_outcoming_file(&addr);
-        printf("QEMU %d connect to %d %s:%s success\n", local_index, i, addr.host, addr.port);
-        printf("req_files[%d] connect to %s:%s success\n", i, addr.host, addr.port);
+        f = qemu_rdma_build_outcoming_file(&addr);
+        if (f == NULL) {
+            printf("qemu_rdma_build_outcoming_file failed.");
+            return;
+        } else {
+            req_files[i] = f;
+            printf("QEMU %d connect to %d %s:%s success\n", local_index, i, addr.host, addr.port);
+            printf("req_files[%d] connect to %s:%s success\n", i, addr.host, addr.port);
+        }
 
         ret = get_rdma_router_address(i, RDMA_LISTEN_REVERSE, &addr);
         if (ret) {
             printf("get_router_address failed, ret: %d\n", ret);
             return;
         }
-        listen_req_files[i] = qemu_rdma_build_outcoming_file(&addr);
-        printf("QEMU %d connect to QEMU %d %s:%s success\n", local_index, i, addr.host, addr.port);
+        f = qemu_rdma_build_outcoming_file(&addr);
+        if (f == NULL) {
+            printf("qemu_rdma_build_outcoming_file failed.");
+            return;
+        } else {
+            listen_req_files[i] = f;
+            printf("QEMU %d connect to QEMU %d %s:%s success\n", local_index, i, addr.host, addr.port);
+        }
     }
 
     bool *done_list = (bool *)g_malloc0(qemu_nums * sizeof(bool));
