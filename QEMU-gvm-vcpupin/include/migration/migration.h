@@ -366,6 +366,8 @@ struct router_address {
     int target;
 };
 
+#define RDMA_CONNECT_TRIAL_LIMIT 100
+
 QEMUFile * qemu_rdma_build_outcoming_file(struct router_address *addr);
 QEMUFile * qemu_rdma_build_incoming_file(struct router_address *addr);
 #endif

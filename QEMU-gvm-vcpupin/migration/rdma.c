@@ -3748,7 +3748,9 @@ QEMUFile * qemu_rdma_build_outcoming_file(struct router_address *addr)
     Error *local_err = NULL;
     RDMAContext *rdma;
 
-    while (1) {
+    int i;
+
+    for (i = 0; i < RDMA_CONNECT_TRIAL_LIMIT; i++) {
         rdma = g_new0(RDMAContext, 1);
         rdma->current_index = -1;
         rdma->current_chunk = -1;
@@ -3764,14 +3766,19 @@ QEMUFile * qemu_rdma_build_outcoming_file(struct router_address *addr)
         sleep(1);
     }
 
-    printf("RDMA connect to %s:%s success\n", addr->host, addr->port);
+    if (ret == 0) {
+        printf("RDMA connect to %s:%s success\n", addr->host, addr->port);
 
-    f = qemu_fopen_rdma(rdma, "wb");
-    if (f == NULL) {
-        printf("qemu_fopen_rdma fail on %s:%s\n", addr->host, addr->port);
-        qemu_rdma_cleanup(rdma);
+        f = qemu_fopen_rdma(rdma, "wb");
+        if (f == NULL) {
+            printf("qemu_fopen_rdma fail on %s:%s\n", addr->host, addr->port);
+            qemu_rdma_cleanup(rdma);
+            return NULL;
+        }
+        return f;
+    } else {
+        printf("RDMA connect to %s:%s fail : Exceed limit\n", addr->host, addr->port);
         return NULL;
     }
-    return f;
 }
 

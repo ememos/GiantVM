@@ -385,9 +385,10 @@ static void qemu_io_router_thread_run_rdma(void)
     }
 }
 
-static void connect_io_router_rdma(void)
+static int connect_io_router_rdma(void)
 {
     struct router_address addr;
+    QEMUFile* f;
     int ret;
     int i = 0;
     int done = 0;
@@ -401,19 +402,31 @@ static void connect_io_router_rdma(void)
         ret = get_rdma_router_address(i, RDMA_CONNECT, &addr);
         if (ret) {
             printf("get_router_address failed, ret: %d\n", ret);
-            return;
+            return ret;
         }
-        req_files[i] = qemu_rdma_build_outcoming_file(&addr);
-        printf("QEMU %d connect to %d %s:%s success\n", local_index, i, addr.host, addr.port);
-        printf("req_files[%d] connect to %s:%s success\n", i, addr.host, addr.port);
+        f = qemu_rdma_build_outcoming_file(&addr);
+        if (f == NULL) {
+            printf("qemu_rdma_build_outcoming_file failed.");
+            return -EINVAL;
+        } else {
+            req_files[i] = f;
+            printf("QEMU %d connect to %d %s:%s success\n", local_index, i, addr.host, addr.port);
+            printf("req_files[%d] connect to %s:%s success\n", i, addr.host, addr.port);
+        }
 
         ret = get_rdma_router_address(i, RDMA_LISTEN_REVERSE, &addr);
         if (ret) {
             printf("get_router_address failed, ret: %d\n", ret);
-            return;
+            return ret;
         }
-        listen_req_files[i] = qemu_rdma_build_outcoming_file(&addr);
-        printf("QEMU %d connect to QEMU %d %s:%s success\n", local_index, i, addr.host, addr.port);
+        f = qemu_rdma_build_outcoming_file(&addr);
+        if (f == NULL) {
+            printf("qemu_rdma_build_outcoming_file failed.");
+            return -EINVAL;;
+        } else {
+            listen_req_files[i] = f;
+            printf("QEMU %d connect to QEMU %d %s:%s success\n", local_index, i, addr.host, addr.port);
+        }
     }
 
     bool *done_list = (bool *)g_malloc0(qemu_nums * sizeof(bool));
@@ -428,6 +441,7 @@ static void connect_io_router_rdma(void)
         }
     }
     free(done_list);
+    return 0;
 }
 
 #else /* ROUTER_CONNECTION_RDMA */
@@ -610,7 +624,10 @@ static void connect_io_router(void)
     printf("connect_io_router...\n");
 
 #ifdef ROUTER_CONNECTION_RDMA
-    connect_io_router_rdma();
+    if(connect_io_router_rdma()) {
+        error_report("connect_io_router_rdma failed");
+        exit(1);
+    }
 #else
     int index = local_cpu_start_index / local_cpus;
 
