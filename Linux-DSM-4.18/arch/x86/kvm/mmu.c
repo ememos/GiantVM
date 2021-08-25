@@ -5069,7 +5069,6 @@ static u64 mmu_pte_write_fetch_gpte(struct kvm_vcpu *vcpu, gpa_t *gpa,
 				    const u8 *new, int *bytes)
 {
 	u64 gentry;
-	int r;
 	struct kvm_memory_slot *slot;
 
 	/*
