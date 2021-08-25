@@ -1038,6 +1038,7 @@ static void *qemu_kvm_cpu_thread_fn(void *arg)
             }
         }
         qemu_mutex_unlock(&qemu_remote_mutex);
+        qemu_mutex_lock_iothread();
     }
 
     qemu_kvm_destroy_vcpu(cpu);
@@ -1738,8 +1739,8 @@ void dump_drift_info(FILE *f, fprintf_function cpu_fprintf)
 }
 
 void wake_remote_cpu(void) {
-    qemu_cond_broadcast(&qemu_remote_cpu_cond);
     wait_remote_cpu_count = smp_cpus - local_cpus;
+    qemu_cond_broadcast(&qemu_remote_cpu_cond);
     while (wait_remote_cpu_count > 0) {
         /*wait all remote cpu thread to change CPU status */
     }
