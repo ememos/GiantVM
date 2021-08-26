@@ -79,7 +79,7 @@ int xbzrle_encode_buffer(const uint8_t *old_buf, const uint8_t *new_buf, int sle
     uint32_t zrun_len = 0, nzrun_len = 0;
     int d = 0, i = 0;
     long res;
-    uint8_t *nzrun_start = NULL;
+    const uint8_t *nzrun_start = NULL;
 
     BUG_ON((((uintptr_t)old_buf | (uintptr_t)new_buf | slen) %
                sizeof(long)));
