@@ -1,0 +1,42 @@
+name: C/C++ CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-QEMU:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python 2.7
+      uses: actions/setup-python@v2
+      with:
+        python-version: 2.7
+    - name: install library
+      run: sudo apt install libnuma-dev librdmacm-dev
+    - name: QEMU-configure
+      working-directory: QEMU-gvm-vcpupin
+      run: ./configure --target-list=x86_64-softmmu --enable-kvm --enable-rdma
+    - name: QEMU-make
+      working-directory: QEMU-gvm-vcpupin
+      run: make -j`nproc`
+      
+  build-Linux:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: install library
+      run: sudo apt install libelf-dev gcc-7
+    - name: Linux-configure
+      working-directory: Linux-DSM-4.18
+      run: cp ../config-4.18.20-gvm ./.config
+    - name: Linux-make
+      working-directory: Linux-DSM-4.18
+      run: make -j`nproc` CC="gcc-7"
