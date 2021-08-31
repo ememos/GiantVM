@@ -384,222 +384,187 @@ Call the corresponding function of listener to update the address space.
 Since AddressSpace is a tree structure, address_space_update_topology is called to map (flatten) the tree structure to a linear address space using the FlatView model. Compare the new and old FlatView, perform the corresponding operation on the inconsistent FlatRange, and finally operate the KVM.
 
 ##### generate_memory_topology
-
 ```
-=> addrrange_make                   创建起始地址为 0，结束地址为 2^64 的地址空间，作为 guest 的线性地址空间
-=> render_memory_region             从根级 region 开始，递归将 region 映射到线性地址空间中，产生一个个 FlatRange，构成 FlatView
-=> flatview_simplify                将 FlatView 中连续的 FlatRange 进行合并为一个
+➔ addrrange_make         Create an address space with a start address of 0 and an end address of 2^64 as the guest's linear address space 
+➔ render_memory_region   Starting from the root-level region, recursively map the region to the linear address space to generate a FlatRange to form a FlatView  
+➔ faltview_simplify      Combine consecutive FlatRange in FlatView into one
 ```
 
-AddressSpace 的 root 成员是该地址空间的根级 MemoryRegion ，generate_memory_topology 负责将它的树状结构进行压平，从而能够映射到一个线性地址空间，得到 FlatView 。
+The root member of AddressSpace is the root-level MemoryRegion of the address space, and generate_memory_topology is responsible for flatterening its tree structure so that it can be mapped to a linear address space and get FlatView.
 
 ##### address_space_update_topology_pass
-
-比较该 AddressSpace 的新老 FlatRange 是否有变化，如果有，从前到后或从后到前遍历 AddressSpace 的 listeners，调用对应 callback 函数。
+If you want to compare the new and old FlatRange of tthe AddressSpace, traverse the listeners of the AddressSpace from front to back or from back to front and call the correspoding callback function.
 
 ```
-=> MEMORY_LISTENER_UPDATE_REGION => section_from_flat_range      根据 FlatRange 的范围构造 MemoryRegionSection
-                                 => MEMORY_LISTENER_CALL
+➔ MEMORY_LISTENER_UPDATE_REGION ➔ section_from_flat_range   Construct MemoryRegionSection according to the range of FlatRange
+                                ➔ MEMORY_LISTENER_CALL
 ```
 
-举个例子，前面提到过，在初始化流程中，注册了 kvm_state.memory_listener 作为 address_space_memory 的 listener，它会被加入到 AddressSpace 的 listeners 中。于是如果 address_space_memory 发生了变化，则调用会调用 memory_listener 中相应的函数。
+For example, as we mentioned, in the initalization process, kvm_state.memory_listener is registered as the listener of the address_space_memory and added to the listener of AddressSpace.
 
-例如 MEMORY_LISTENER_UPDATE_REGION 传入的 callback 参数为 region_add ，则调用 memory_listener.region_add (kvm_region_add)。
-
-
+If the callback parameter in MEMORY_LISTENER_UPDATE_REGION is region_add, then memory_listener.region_add(kvm_region_add) is called.
 
 ##### kvm_region_add
+```
+➔ kvm_set_phys_mem ➔ kvm_lookup_overlapping_slot
+                   ➔ Calculating HVA
+                   ➔ kvm_set_user_memory_region => kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem)
 
 ```
-=> kvm_set_phys_mem => kvm_lookup_overlapping_slot
-                    => 计算起始 HVA
-                    => kvm_set_user_memory_region => kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem)
-```
 
-kvm_lookup_overlapping_slot 用于判断新的 region section 的地址范围 (GPA) 是否与已有 KVMSlot(kml->slots) 有重叠，如果重叠了，需要进行处理：
+kvm_lookup_overlapping_slot is used to determine whether the new address range of local section(GPA) overlaps with the existing KVMSlot(kml->slots).
 
-假设原 slot 可以切分成三个部分：prefix slot + overlap slot + suffix slot，重叠区域为 overlap
+Aussuming that the original slot can be divied into three parts, prefix slot + overlap slot + sufix slot, it overlaps with the overlap slot.
 
-对于完全重叠的情况，既有 prefix slot 又有 suffix slot。无需注册新 slot。
+For complete overlap, there are both prefix slot and suffix slot. No need to register a new slot.
 
-对于部分重叠的情况，prefix slot = 0 或 suffix slot = 0。则执行以下流程：
+For partial overlap, there are prefix slot = 0 and suffix slot = 0. Then it perfroms the follwing process:
 
-1. 删除原有 slot
-2. 注册 prefix slot 或 suffix slot
-3. 注册 overlap slot
+1. Delete the original slot
+2. Register the prefix slot or suffix slot
+3. Register the overlap slot
 
-当然如果没有重叠，则直接注册新 slot 即可。然后将 slot 通过 kvm_vm_ioctl(s, KVM_SET_USER_MEMORY_REGION, &mem) 更新 KVM 中对应的 kvm_memory_slot 。
+Of course, if there is no overlap, just register a new slot directly. And then update the slot to the correspoding kvm_memory_slot of KVM through kvm_vm_ioctl(KVM_SET_USER_MEMORY_REGION).
 
-QEMU 中维护 slot 结构也需要更新，对于原有的 slot，因为它是 kml->slots 数组的项，所以在 kvm_set_phys_mem 直接修改即可。对于 kml->slots 中没有的 slot，如 prefix、suffix、overlap，则需要调用 kvm_alloc_slot => kvm_get_free_slot ，它会在 kml->slots 找一个空白的 (memory_size = 0) 为 slot 返回，然后对该 slot 进行设置。
+The maintance of the slot structure in QEMU also needs to be updated. For original slot, because it is an kml->slots arrays, it can be modified directly in kvm_set_phys_mem. For slots that are not in kml->slots, such as prefix, suffix and overlap, you need to call the kvm_alloc_slot ➔ kvm_get_free_slot to find a blank(memory_size == 0) in kml->slots and set the slot.
 
-##### kvm_set_phys_mem => kvm_set_user_memory_region
-
-KVM 规定了更新 memory slot 的参数为 kvm_userspace_memory_region ：
+##### kvm_set_phys_mem ➔ kvm_set_user_memory_region
+KVM specifies that the parameter for updaing the memory slot as kvm_userspace_memory_region.
 
 ```c
 struct kvm_userspace_memory_region {
-    __u32 slot;                                                             // 对应 kvm_memory_slot 的 id
+    __u32 slot;                       // kvm_memory_slot id
     __u32 flags;
-    __u64 guest_phys_addr;                                                  // GPA
-    __u64 memory_size; /* bytes */                                          // 大小
-    __u64 userspace_addr; /* start of the userspace allocated memory */     // HVA
+    __u64 guest_phys_addr;            // GVA
+    __u64 memory_size;     /* bytes */ // Size
+    __u64 userspace_addr;  /* start of the userspace allocated memory */ // HVA
 };
 ```
 
-它会在 kvm_set_phys_mem => kvm_set_user_memory_region 的过程中进行计算并填充，流程如下：
+It is calculated and filled in the process of kvm_set_phys_mem ➔ kvm_set_user_memory_region. And the process is as follows:
 
-1. 根据 region 的起始 HVA(memory_region_get_ram_ptr) + region section 在 region 中的偏移量 (offset_within_region) + 页对齐修正 (delta) 得到 section 真正的起始 HVA，填入 userspace_addr
+1. According to the starting HVA(memory_region_get_ram_ptr) of the region + the offset of the region section in the region(offset_within_region) + page alignment correction(delta) to get the real starting HVA of section, fill in userspace_addr.
 
-    在 memory_region_get_ram_ptr 中，如果当前 region 是另一个 region 的 alias，则会向上追溯，一直追溯到非 alias region(实体 region) 为止。将追溯过程中的 alias_offset 加起来，可以得到当前 region 在实体 region 中的偏移量。
+In memory_region_get_ram_ptr, if the current region is the alias of anothre region, it will be traced upwards until it reaches the non-alias region(physical region). Add the alias_offset in the traceback process to get the offset of the current region in the entity region.
 
-    由于实体 region 具有对应的 RAMBlock，所以调用 qemu_map_ram_ptr ，将实体 region 对应的 RAMBlock 的 host 和总 offset 加起来，得到当前 region 的起始 HVA。
+Since the entity region has a corresspoding RAMBlock, call qemu_map_ram_ptr to add the host and toal offset of the RAMBlock correspoding to the entity region to get the starting HVA of the current region.
 
-2. 根据 region section 在 AddressSpace 内的偏移量 (offset_within_address_space) + 页对齐修正 (delta) 得到 section 真正的 GPA，填入 start_addr
+2. Get the real GPA of the section according to the offset of the region sectio in the AddressSpace(offset_within_address_space) + page alignment correction(delta), and fill in start_addr.
 
-3. 根据 region section 的大小 (size) - 页对齐修正 (delta) 得到 section 真正的大小，填入 memory_size
-
-
-
-
+3. Get the real size of the section according to the size of the region section and page alignment correction, and fill it in memory_size.
 
 ### RAMBlock
+MemoryRegion represents a section of memory in the guest memory layout, which has a logical meaning. So the acutal meaning is that who maintains the actual memory information correspoding to this piece of memory?
 
-前面提到，MemoryRegion 表示在 guest memory layout 中的一段内存，具有逻辑意义。那么实际意义，也是就是这段内存所对应的实际内存信息是由谁维护的呢？
-
-我们可以发现在 MemoryRegion 有一个 ram_block 成员，它是一个 RAMBlock 类型的指针，由 RAMBlock 来负责维护实际的内存信息，如 HVA、GPA。比如在刚刚计算 userspace_addr 的流程中，计算 region 的起始 HVA 需要找到对应的 RAMBlock ，然后获取其 host 成员来得到。
-
-RAMBlock 定义如下：
+We can find that there is a ram_block member in MemoryRegion, which is a pointer of type RAMBlock. RAMBlock is responsible for maintaining the actual memory information like the HVA and GPA. For example, in the process of to calculating userspace_addr, the starting HVA of the calculation region must find the corresponding RAMBlock and get its host member. RAMBlock is defined as follows:
 
 ```c
 struct RAMBlock {
-    struct rcu_head rcu;                                        // 用于保护 Read-Copy-Update
-    struct MemoryRegion *mr;                                    // 对应的 MemoryRegion
-    uint8_t *host;                                              // 对应的 HVA
-    ram_addr_t offset;                                          // 在 ram_list 地址空间中的偏移 (要把前面 block 的 size 都加起来)
-    ram_addr_t used_length;                                     // 当前使用的长度
-    ram_addr_t max_length;                                      // 总长度
-    void (*resized)(const char*, uint64_t length, void *host);  // resize 函数
-    uint32_t flags;
-    /* Protected by iothread lock.  */
-    char idstr[256];                                            // id
-    /* RCU-enabled, writes protected by the ramlist lock */
-    QLIST_ENTRY(RAMBlock) next;                                 // 指向在 ram_list.blocks 中的下一个 block
-    int fd;                                                     // 映射文件的文件描述符
-    size_t page_size;                                           // page 大小，一般和 host 保持一致
-};
+    struct rcu_head_rcu;
+    struct MemoryRegion *mr;
+    uint8_t *host;
+    ram_addr_t offset;
+    ram_addr_t used_length;
+    ram_addr_t max_length;
+    void (*resized) (const char*, uint64_t length, void *host);
+    uint32_t flag;
+    char idstr[256];
+    QLIST_ENTRY(RAMBlock) next;
+    int fd;
+    size_t page_size;
+}
 ```
 
-前文提到过， MemoryRegion 会调用 memory_region_* 对 MemoryRegion 结构进行初始化。常见的函数有以下几个：
+MemoryRegion will call memory_region_* to initialize the MemoryRegion structure. The common functions are as follows:
 
-* memory_region_init_ram => qemu_ram_alloc
-    通过 qemu_ram_alloc 创建的 RAMBlock.host 为 NULL
+* memory_region_init_ram: RAMBlock.host is NULL that created by qemu_ram_alloc
+* memory_region_init_ram_from_file: qemu_ram_alloc_from_file created by RAMBlock call file_ram_alloc to allocate memory using the file of the correspoding path. The hugepage device file(ex: /dec/hugepages) is specified by the `-mem-path` parameter to use hugepage.
+* memory_region_init_ram_ptr: 
+* memory_region_init_resizeable_ram: 
 
-* memory_region_init_ram_from_file => qemu_ram_alloc_from_file
-    通过 qemu_ram_alloc_from_file 创建的 RAMBlock 会调用 file_ram_alloc 使用对应路径的 (设备) 文件来分配内存，通常是由于需要使用 hugepage，会通过 `-mem-path` 参数指定了 hugepage 的设备文件 (如 /dev/hugepages)
-
-* memory_region_init_ram_ptr => qemu_ram_alloc_from_ptr
-    RAMBlock.host 为传入的指针地址，表示从该地址指向的内存分配内存
-
-* memory_region_init_resizeable_ram => qemu_ram_alloc_resizeable
-    RAMBlock.host 为 NULL，但 resizeable 为 true，表示还没有分配内存，但可以 resize。
-
-
-qemu_ram_alloc_* (qemu_ram_alloc / qemu_ram_alloc_from_file / memory_region_init_ram_ptr / memory_region_init_resizeable_ram) 最后都会调用到  qemu_ram_alloc_internal => ram_block_add 。它如果发现 host 为 NULL ，则会调用 phys_mem_alloc (qemu_anon_ram_alloc) 分配内存。让 host 有所指向后，将该 RAMBlock 插入到 ram_list.blocks 中。
-
+qemu_ram_alloc_* (qemu_ram_alloc / qemu_ram_alloc_from_file / memory_region_init_ram_ptr / memory_region_init_resizeable_ram) eventually be called to qemu_ram_alloc_internal ➔ ram_block_add. If it finds that host is NULL, it calls phys_mem_alloc(qemu_anon_ram_alloc) to allocate memory. After making the host point something, insert the RAMBlock into ram_list.blocks.
 
 ##### qemu_anon_ram_alloc
+➔ qemu_ram_mmap(-1, size, QEMU_VMALLOC_ALIGN, false) ➔ mmap
 
-=> qemu_ram_mmap(-1, size, QEMU_VMALLOC_ALIGN, false) => mmap
-
-通过 mmap 在 QEMU 的进程地址空间中分配 size 大小的内存。
-
-
-
-
+Use mmap to allocate memory of size in the process address space of QEMU.
 
 ### RAMList
-
-ram_list 是一个全局变量，以链表的形式维护了所有的 RAMBlock 。
+ram_list is a global variable that maintains all RAMBlock form using linked list.
 
 ```c
-RAMList ram_list = {.blocks = QLIST_HEAD_INITIALIZER(ram_list.blocks) };
+RAMList ram_list = { .blocks = QLIST_HEAD_INITIALIZER(ram_list.blocks) };
 
 typedef struct RAMList {
     QemuMutex mutex;
     RAMBlock *mru_block;
     /* RCU-enabled, writes protected by the ramlist lock. */
-    QLIST_HEAD(, RAMBlock) blocks;                              // RAMBlock 链表
-    DirtyMemoryBlocks *dirty_memory[DIRTY_MEMORY_NUM];          // 记录脏页信息，用于 VGA / TCG / Live Migration
-    uint32_t version;                                           // 每更改一次加 1
+    QLIST_HEAD(, RAMBlock) blocks;                        // RAMBlock linked list
+    DirtyMemoryBLocks *dirty_memory[DIRTY_MEMORY_NUM];    // Record dirty page information for VGA / TCG / Live Migration
+    uint32_t version;                                     // Add 1 for every change
 } RAMList;
 extern RAMList ram_list;
 ```
 
-注：
-
-* VGA: 显卡仿真通过 dirty_memory 跟踪 dirty 的视频内存，用于重绘界面
-* TCG: 动态翻译器通过 dirty_memory 追踪自调整的代码，当上游指令发生变化时对其重新编译
-* Live Migration: 动态迁移通过 dirty_memory 来跟踪 dirty page，在 dirty page 被改变之后重传
-
-
-
+Note:
+* VGA: Graphics card emulation tracks dirty video memory through dirty_memory to redraw the interface.
+* TCG: Dynamic translator tracks the self-tuning code and recompiles it when upstream instruction changes.
+* Live migration: It tracks dirty pages through dirty_memory and retransmits after the diry pages are changed.
 
 ##### AddressSpaceDispatch
-
-根据：
-
 ```
-address_space_init => address_space_init_dispatch => as->dispatch_listener = (MemoryListener) {
-                                                                            .begin = mem_begin,
-                                                                            .commit = mem_commit,
-                                                                            .region_add = mem_add,
-                                                                            .region_nop = mem_add,
-                                                                            .priority = 0,
-                                                                        };
-                                                  => memory_listener_register(as->dispatch_listener)
+address_space_init ➔ address_space_init_dispatch ➔ as ➔ dispatch_listener = (MemoryListener) {
+    .begin = mem_begin,
+    .commit = mem_commit,
+    .region_add = mem_add,
+    .region_nop = mem_add,
+    .priority = 0,
+}; ➔ memory_listener_register(as ➔ dispatch_listener)
 ```
 
-address_space_memory 上除了绑有 kvm_state.memory_listener ，还会创建并绑定 dispatch_listener 。该 listener 实现了为了在虚拟机退出时根据 GPA 找到对应的 HVA 。
+In addition to kvm_state.memory_listener bound to address_listener, dispatch_listener will also be created and bound. The listener is implemented in order to find the corresponding HVA according to the GPA when the virtual machine exits.
 
-当 memory_region_transaction_commit 调用各个 listener 的 begin 函数时， mem_begin 被调用
+When memory_region_transaction_commit calls the begin function of each listener, mem_begin is called.
 
 ```
-=> g_new0(AddressSpaceDispatch, 1)                  创建 AddressSpaceDispatch 结构作为 AddressSpace 的 next_dispatch 成员
+➔ g_new0(AddressSpaceDispatch, 1)                Create AddressSpaceDispatch structure as next_dispatch member of AddressSpace 
 ```
 
-AddressSpaceDispatch 结构如下：
+The AddressSpaceDispatch structure is as follows:
 
 ```c
 struct AddressSpaceDispatch {
     struct rcu_head rcu;
 
     MemoryRegionSection *mru_section;
-    /* This is a multi-level map on the physical address space.
-     * The bottom level has pointers to MemoryRegionSections.
-     */
+    /*
+    This is a multi-level map on the physical address space.
+    The bottom level has pointers to MemoryRegionSections.
+    */
     PhysPageEntry phys_map;
-    PhysPageMap map;            // GPA -> HVA 的映射，通过多级页表实现
+    PhysPageMap map;           // GPA ➔ HVA mapping, implemented through multi-level page tables
     AddressSpace *as;
-};
+}
 ```
 
-map 成员是一个多级 (6 级) 页表，最后一级页表指向 MemoryRegionSection 。
+The map member is multi-level(6 level) page table, and the last level page table points to MemoryRegionSection.
 
-当 address_space_update_topology_pass => address_space_update_topology_pass 处理 add 时， mem_add 被调用：
+When address_spcae_update_topology_pass processes addition, calls mem_add.
 
-于是调用 register_subpage / register_multipage 将 page 注册到页表中。
+So call register_subpage / register_multipage to register the page in the page table.
 
 ```
-=> 如果 MemoryRegionSection 所属的 MemoryRegion 的 subpage 不存在
-    => subpage_init                                         创建 subpage
-    => phys_page_set => phys_map_node_reserve               分配页目录项
-                     => phys_page_set_level                 填充页表，从 L5 填到 L0
-=> 如果存在
-    => container_of(existing->mr, subpage_t, iomem)         取出
-=> subpage_register                                         设置 subpage
+➔ If the subpage of the MemoryRegion to which the MemoryRegionSectin belongs does not exist
+  ➔ subpage_init                                      Create subpage
+  ➔ phys_page_set ➔ phys_map_node_reserve             Allcation page directory entry
+                  ➔ phys_page_set_level               Fill the page table from L5 to L0
+
+➔ If it exists
+  ➔ container_of(existing->mr, suboage_t, iomem)      Take out
+➔ subpage_register                                    subpage_register set subpage
 ```
 
-因此从 KVM 中退出到 QEMU 之后，通过 AddressSpaceDispatch.map 可以找到对应的 MemoryRegionSection ，继而找到对应的 HVA
+Therefore, after exiting from KVM to QEMU, you can find the correspoding MemoryRegionSection through AddressSpaceDispatch.map, and then find the corresspoding HVA.
 
 
 
