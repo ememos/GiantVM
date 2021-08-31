@@ -376,12 +376,12 @@ Call the corresponding function of listener to update the address space.
 ##### address_space_update_topology
 
 ```
-=> address_space_get_flatview                             获取原来 FlatView(AddressSpace.current_map)
-=> generate_memory_topology                               生成新的 FlatView
-=> address_space_update_topology_pass                     比较新老 FlatView，对其中不一致的 FlatRange，执行相应的操作。
+=> address_space_get_flatview                             Get the original FlatView(AddressSpace.current_map)
+=> generate_memory_topology                               Generate new FlatView
+=> address_space_update_topology_pass                     Relatively new and old FlatView, perform corresponding operations on the inconsistent FlatRange.
 ```
 
-由于 AddressSpace 是树状结构，于是调用 address_space_update_topology ，使用 FlatView 模型将树状结构映射 (压平) 到线性地址空间。比较新老 FlatView，对其中不一致的 FlatRange，执行相应的操作，最终操作的 KVM。
+Since AddressSpace is a tree structure, address_space_update_topology is called to map (flatten) the tree structure to a linear address space using the FlatView model. Compare the new and old FlatView, perform the corresponding operation on the inconsistent FlatRange, and finally operate the KVM.
 
 ##### generate_memory_topology
 
