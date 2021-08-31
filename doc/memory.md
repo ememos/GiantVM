@@ -288,7 +288,7 @@ Looking back at the memory initialization process, the job is very simple. creat
 
 ##### KVMMemoryListener
 
-在初始化过程中，我们为 address_space_memory 和 address_space_io 分别注册了 memory_listener 和 kvm_io_listener 。前者类型为 KVMMemoryListener ，后者类型为 MemoryListener：
+During the initialization process, memory_listener and kvm_io_listener were registered for address_space_memory and address_space_io respectively. The former type is KVMMemoryListener and the latter type is MemoryListener:
 
 ```c
 typedef struct KVMMemoryListener {
@@ -325,13 +325,13 @@ struct MemoryListener {void (*begin)(MemoryListener *listener);
 };
 ```
 
-可以看到 KVMMemoryListener 主体就是 MemoryListener ，而 MemoryListener 包含大量函数指针，用来指向 address_space 成员发生变化时调用的回调函数。
+It can be seen that the main body of the KVMMemoryListener is the MemoryListener, and the MemoryListener contains a large number of function pointers to point to the callback function that is called when the address_space member changes.
 
-address_space_io 上绑有 kvm_io_listener 和 dispatch_listener 。因此 AddressSpace 和 listener 存在一对多的关系，当 AddressSpace 发生变化时，其绑定的所有 listener 都会被触发。这是如何实现的呢？
+It can be seen that the main body of the KVMMemoryListener is the MemoryListener, and the MemoryListener contains a large number of function pointers to point to the callback function that is called when the address_space member changes.
 
-实际上，任何对 AddressSpace 和 MemoryRegion 的操作，都以 memory_region_transaction_begin 开头，以 memory_region_transaction_commit 结尾。
+In fact, any operation on AddressSpace and MemoryRegion starts with memory_region_transaction_begin and ends with memory_region_transaction_commit.
 
-这些操作包括：启用、析构、增删 eventfd、增删 subregion、改变属性 (flag)、设置大小、开启 dirty log 等，如：
+These operations include: enabling, destructuring, adding and deleting eventfd, adding and deleting subregions, changing attributes (flag), setting size, opening dirty log, etc., such as:
 
 * memory_region_add_subregion
 * memory_region_del_subregion
@@ -346,7 +346,7 @@ address_space_io 上绑有 kvm_io_listener 和 dispatch_listener 。因此 Addre
 * memory_region_finalize
 * ...
 
-对 AddressSpace 的 root MemoryRegion 进行操作：
+These operations include: enabling, destructuring, adding and deleting eventfd, adding and deleting subregions, changing attributes (flag), setting size, opening dirty log, etc., such as:
 
 * address_space_init
 * address_space_destroy
