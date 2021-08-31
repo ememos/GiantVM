@@ -848,140 +848,447 @@ union kvm_mmu_page_role {
 
 #### EPT Violation
 
-当 Guest 第一次访问某个页面时，由于没有 GVA 到 GPA 的映射，触发 Guest OS 的 page fault。于是 Guest OS 会建立对应的 pte 并修复好各级页表，最后访问对应的 GPA。由于没有建立 GPA 到 HVA 的映射，于是触发 EPT Violation，VMEXIT 到 KVM。 KVM 在 vmx_handle_exit 中执行 kvm_vmx_exit_handlers[exit_reason]，发现 exit_reason 是 EXIT_REASON_EPT_VIOLATION ，因此调用 handle_ept_violation 。
+When a guest visits a Guest physical page for the first time, since there is no mapping from GVA to GPA, a page fault of the Guest OS is triggered. Then Guest OS will establish the corresponding pte and repair the page tables at all levels, and finally access the corresponding GPA. Since there is no mapping from GPA to HVA, EPT Violation is triggered. EPT violation changes control from guest mode to host mode.
 
-##### handle_ept_violation
+```C
+arch/x86/kvm/x86.c
 
+static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+{
+    ...
+    kvm_x86_ops->run(vcpu); // Run Guest
+    ...
+    r = kvm_x86_ops->handle_exit(vcpu); // In intel cpu, .handle_exit = vmx_handle_exit
+}
 ```
-=> vmcs_readl(EXIT_QUALIFICATION)                       获取 EPT 退出的原因。EXIT_QUALIFICATION 是 Exit reason 的补充，详见 Vol. 3C 27-9 Table 27-7
-=> vmcs_read64(GUEST_PHYSICAL_ADDRESS)                  获取发生缺页的 GPA
-=> 根据 exit_qualification 内容得到 error_code，可能是 read fault / write fault / fetch fault / ept page table is not present
-=> kvm_mmu_page_fault => vcpu->arch.mmu.page_fault (tdp_page_fault)
+In `vmx_handle_exit`, KVM find a appropriate handler in the `kvm_vmx_exit_handlers[]`. When exit_reason is EXIT_REASON_EPT_VIOLATION, `handle_ept_violation` will handle this VMEXIT.
+```C
+arch/x86/kvm/vmx.c
+
+static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+    ...
+    [EXIT_REASON_EPT_VIOLATION]       = handle_ept_violation
+}
+
+static int vmx_handle_exit(struct kvm_vcpu *vcpu)
+{
+    ...
+    if (exit_reason < kvm_vmx_max_exit_handlers
+    && kvm_vmx_exit_handlers[exit_reason])
+        return kvm_vmx_exit_handlers[exit_reason](vcpu);
+}
+```
+In `handle_ept_violation`, KVM get the exit reason and the guest physical address where the EPT violation occured. Then KVM parse the exit code and pass it to `kvm_mmu_page_fault`.
+```C
+arch/x86/kvm/vmx.c
+
+static int handle_ept_violation(struct kvm_vcpu *vcpu)
+{
+    unsigned long exit_qualification;
+    gpa_t gpa;
+    u64 error_code;
+
+    /* Get the reason for EPT exit. EXIT_QUALIFICATION is a supplement to Exit reason, see Vol. 3C 27-9 Table 27-7 for details */
+    exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
+    ...
+
+    /* Get the GPA of the page fault */
+    gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
+    ...
+
+    return kvm_mmu_page_fault(vcpu, gpa, error_code, NULL, 0); // tdp_page_fault
+}
+```
+When TDP(Two-Dimensional-Paging) is enabled, kvm_mmu_page_fault call `tdp_page_fault`.
+```C
+arch/x86/kvm/mmu.c
+
+int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t cr2, u64 error_code,
+               void *insn, int insn_len)
+{
+    ...
+    if (r == RET_PF_INVALID) {
+        r = vcpu->arch.mmu.page_fault(vcpu, cr2, lower_32_bits(error_code), // tdp_page_fault
+                          false);
+        WARN_ON(r == RET_PF_INVALID);
+    }
+    ...
+}
 ```
 
 ##### tdp_page_fault
+It can be found that there are two main steps. The first step is finding the physical page corresponding to the GPA, if not, KVM will allocate a new page. The second step is updating the EPT with host physical page. Each step corresponds to these functions `try_async_pf`, `__direct_map`.
+```C
+arch/x86/kvm/mmu.c
 
+static int tdp_page_fault(struct kvm_vcpu *vcpu, gva_t gpa, u32 error_code,
+              bool prefault)
+{
+    gfn_t gfn = gpa >> PAGE_SHIFT;
+    int write = error_code & PFERR_WRITE_MASK;
+    bool map_writable;
+    ...
+
+#ifdef CONFIG_KVM_DSM
+    /* Disable large pages for DSM */
+    if (vcpu->kvm->arch.dsm_enabled)
+            force_pt_level = true;
+#endif
+    /* When force_pt_level == true, return PT_PAGE_TABLE_LEVEL(=1)*/
+    level = mapping_level(vcpu, gfn, &force_pt_level);
+    ...
+
+    /* converts gfn to pfn, if not exists allocate a new page */
+    if (try_async_pf(vcpu, prefault, gfn, gpa, &pfn, write, &map_writable))
+        return RET_PF_RETRY;
+
+    spin_lock(&vcpu->kvm->mmu_lock);
+    ...
+
+    /* Update EPT table, adding new mapping relationship to EPT layer by layer */
+    r = __direct_map(vcpu, write, map_writable, level, gfn, pfn, prefault, dsm_access);
+    spin_unlock(&vcpu->kvm->mmu_lock);
+    ...
+}
 ```
-=> gfn = gpa >> PAGE_SHIFT      将 GPA 右移 pagesize 得到 gfn(guest frame number)
-=> mapping_level                计算 gfn 在页表中所属 level，不考虑 hugepage 则为 L1
-=> try_async_pf                 将 gfn 转换为 pfn(physical frame number)
-        => kvm_vcpu_gfn_to_memslot => __gfn_to_memslot                  找到 gfn 对应的 slot
-        => __gfn_to_pfn_memslot                                         找到 gfn 对应的 pfn
-                => __gfn_to_hva_many => __gfn_to_hva_memslot            计算 gfn 对应的起始 HVA
-                => hva_to_pfn                                           计算 HVA 对应的 pfn，同时确保该物理页在内存中
-
-=> __direct_map                                                         更新 EPT，将新的映射关系逐层添加到 EPT 中
-    => for_each_shadow_entry                                            从 level4(root) 开始，逐层补全页表，对于每一层：
-        => mmu_set_spte                                                 对于 level1 的页表，其页表项肯定是缺的，所以不用判断直接填上 pfn 的起始 hpa
-        => is_shadow_present_pte                                        如果下一级页表页不存在，即当前页表项没值 (*sptep = 0)
-            => kvm_mmu_get_page                                         分配一个页表页结构
-            => link_shadow_page                                         将新页表页的 HPA 填入到当前页表项 (sptep) 中
-```
-
-可以发现主要有两步，第一步会获取 GPA 所对应的物理页，如果没有会进行分配。第二步是更新 EPT。
+=> __direct_map Update EPT, adding new mapping relationship to EPT layer by layer
+    => for_each_shadow_entry starting from level4 (root), complete the page table layer by layer, for each layer:
+        => mmu_set_spte For the page table of level1, the page table entry is definitely missing, so there is no need to judge directly to fill in the starting hpa of pfn
+        => is_shadow_present_pte If the next-level page table page does not exist, that is, the current page table entry has no value (*sptep = 0)
+            => kvm_mmu_get_page allocates a page table page structure
+            => link_shadow_page fills the HPA of the new page table into the current page table entry (sptep)
 
 ##### try_async_pf
-1. 根据 gfn 找到对应的 memslot
-2. 用 memslot 的起始 HVA(userspace_addr) + (gfn - slot 中的起始 gfn(base_gfn) ) * 页大小 (PAGE_SIZE)，得到 gfn 对应的起始 HVA
-3. 为该 HVA 分配一个物理页，有 hva_to_pfn_fast 和 hva_to_pfn_slow 两种， hva_to_pfn_fast 实际上是调用 __get_user_pages_fast ，会尝试去 pin 该 page，即确保该地址所在的物理页在内存中。如果失败，退化到 hva_to_pfn_slow ，会先去拿 mm->mmap_sem 的锁然后调用 __get_user_pages 来 pin。
-4. 如果分配成功，对其返回的 struct page 调用 page_to_pfn 得到对应的 pfn
+1. Find the corresponding memslot according to gfn
+2. Using the memslot, get the starting HVA corresponding to gfn.
+3. Find a physical page mapped with HVA. There are two types of function to do  this: `hva_to_pfn_fast` and `hva_to_pfn_slow`. hva_to_pfn_fast actually calls __get_user_pages_fast and will try to find the physical page. If it succeedis, pin(increase ref count) the page. If it fails, then fall back to hva_to_pfn_slow. It will allocate and pin a new page.
+4. If the allocation is successful, call page_to_pfn to get the allocated pages's pfn
 
-该函数建立了 gfn 到 pfn 的映射，同时将该 page pin 死在 host 的内存中。
+```C
+arch/x86/kvm/mmu.c
 
+static bool try_async_pf(struct kvm_vcpu *vcpu, bool prefault, gfn_t gfn,
+             gva_t gva, kvm_pfn_t *pfn, bool write, bool *writable)
+{
+    struct kvm_memory_slot *slot;
+    bool async;
+    ...
+
+    /* Get memory slot from gfn */
+    slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
+
+    /* Inside the __gfn_to_pfn_memslot
+     * => __gfn_to_pfn_memslot
+     *   => hva_to_pfn
+     *     => hva_to_pfn_fast (If physical page is already exist, else fallback to slow path)
+     *       => __get_user_pages_fast
+     *       => page_to_pfn
+     *     => hva_to_pfn_slow (if physical page is not exist, allocate a new page)
+     *       => __get_user_pages
+     *       => page_to_pfn
+     */
+    *pfn = __gfn_to_pfn_memslot(slot, gfn, false, &async, write, writable);
+}
+```
 
 ##### __direct_map
 
-通过迭代器 kvm_shadow_walk_iterator 将 EPT 中与该 GPA 相关的页表补充完整。
+Complete the page table related to the GPA in the EPT through the iterator `kvm_shadow_walk_iterator` and macro `for_each_shadow_entry`.
 
 ```c
+arch/x86/kvm/mmu.c
+
 struct kvm_shadow_walk_iterator {
-    u64 addr;                   // 发生 page fault 的 GPA，迭代过程就是要把 GPA 所涉及的页表项都填上
-    hpa_t shadow_addr;          // 当前页表项的 HPA，在 shadow_walk_init 中设置为 vcpu->arch.mmu.root_hpa
-    u64 *sptep;                 // 指向当前页表项，在 shadow_walk_okay 中更新
-    int level;                  // 当前层级，在 shadow_walk_init 中设置为 4 (x86_64 PT64_ROOT_LEVEL)，在 shadow_walk_next 中减 1
-    unsigned index;             // 在当前 level 页表中的索引，在 shadow_walk_okay 中更新
+    u64 addr;           // The GPA of a page fault occurs, the iteration process is to fill in all the page table items involved in the GPA
+    hpa_t shadow_addr;  // The HPA of the current page table entry is set to vcpu->arch.mmu.root_hpa in shadow_walk_init
+    u64 *sptep;         // Point to the current page table entry, updated in shadow_walk_okay
+    int level;          // The current level, set to 4 in shadow_walk_init (x86_64 PT64_ROOT_LEVEL), and subtract 1 in shadow_walk_next
+    unsigned index;     // The index in the current level page table, updated in shadow_walk_okay
 };
 ```
+```C
+arch/x86/kvm/mmu.c
 
-在每轮迭代中，sptep 都会指向 GPA 在当前级页表中所对应的页表项，我们的目的就是把下一级页表的 GPA 填到该页表项内 (即设置 *sptep)。因为是缺页，可能会出现下一级的页表页不存在的问题，这时候需要分配一个页表页，然后再将该页的 GPA 填进到 *sptep 中。
+#define for_each_shadow_entry(_vcpu, _addr, _walker)    \
+        for (shadow_walk_init(&(_walker), _vcpu, _addr);        \
+             shadow_walk_okay(&(_walker));                      \
+             shadow_walk_next(&(_walker)))
 
-举个例子，对于 GPA(如 0xfffff001)，其二进制为：
+static void shadow_walk_init(struct kvm_shadow_walk_iterator *iterator,
+                             struct kvm_vcpu *vcpu, u64 addr)
+{
+        iterator->addr = addr;
+        iterator->shadow_addr = vcpu->arch.mmu.root_hpa;
+        iterator->level = vcpu->arch.mmu.shadow_root_level;
 
+        ...
+}
+
+static bool shadow_walk_okay(struct kvm_shadow_walk_iterator *iterator)
+{
+        if (iterator->level < PT_PAGE_TABLE_LEVEL)
+                return false;
+
+        iterator->index = SHADOW_PT_INDEX(iterator->addr, iterator->level);
+        iterator->sptep = ((u64 *)__va(iterator->shadow_addr)) + iterator->index;
+        return true;
+}
+
+static void __shadow_walk_next(struct kvm_shadow_walk_iterator *iterator,
+                               u64 spte)
+{
+        if (is_last_spte(spte, iterator->level)) {
+                iterator->level = 0;
+                return;
+        }
+
+        iterator->shadow_addr = spte & PT64_BASE_ADDR_MASK;
+        --iterator->level;
+}
+
+static void shadow_walk_next(struct kvm_shadow_walk_iterator *iterator)
+{
+        __shadow_walk_next(iterator, *iterator->sptep);
+}
+```
+
+In each iteration, shadow_addr and level is updated by shadow_walk_next. Then, index and sptep is calculated by `shadow_walk_okay`. For example, for GPA (such as 0xfffff001), the binary is:
 ```
 000000000 000000011 111111111 111111111 000000000001
-  PML4      PDPT       PD        PT        Offset
+    PML4       PDPT        PD        PT       Offset
 ```
+- When level = 4, index is 0   (000000000)
+- When level = 3, index is 3   (000000011)
+- When level = 2, index is 511 (111111111)
+- When level = 1, index is 511 (111111111)
 
-初始化状态：level = 4，shadow_addr = root_hpa，addr = GPA
+sptep will point to the page table entry corresponding to the GPA in the current level page table. Our purpose is to fill the GPA of the next level page table into the page table entry (ie set *sptep). Because EPT fault occured, there may be a problem that the next-level page table page does not exist (*sptep == 0). At that time, a new page is allocated for a page table, and then KVM fill the empty entry in the EPT table.
 
-执行流程：
+```C
+arch/x86/kvm/mmu.c
 
-1. index = addr 在当前 level 分段的值。如在 level = 4 时为 0(000000000)，在 level = 3 时为 3(000000011)
-2. sptep = va(shadow_addr) + index，得到 GPA 在当前地址中所对应的页表项 HVA
-3. 如果 *sptep 没值，分配一个 page 作为下级页表，同时将 *sptep 设置为该 page 的 HPA
-4. shadow_addr = *sptep，进入下级页表，循环
+static int __direct_map(struct kvm_vcpu *vcpu, int write, int map_writable,
+                        int level, gfn_t gfn, kvm_pfn_t pfn, bool prefault, int dsm_access)
 
-开启 hugepage 时，由于页表项管理的范围变大，所需页表级数减少，在默认情况下 page 大小为 2M，因此无需 level 1。
+{
+        struct kvm_shadow_walk_iterator iterator;
+        struct kvm_mmu_page *sp;
+        int emulate = 0;
+        gfn_t pseudo_gfn;
 
+        ...
 
+        for_each_shadow_entry(vcpu, (u64)gfn << PAGE_SHIFT, iterator) {
+                if (iterator.level == level) {
+                        emulate = mmu_set_spte(vcpu, iterator.sptep, dsm_access,
+                                               write, level, gfn, pfn, prefault,
+                                               map_writable);
+                        direct_pte_prefetch(vcpu, iterator.sptep);
+                        ++vcpu->stat.pf_fixed;
+                        break;
+                }
 
-##### mmu_set_spte
+                drop_large_spte(vcpu, iterator.sptep);
 
+                /* If entry is not present, then fill the entry*/
+                if (!is_shadow_present_pte(*iterator.sptep)) {
+                        u64 base_addr = iterator.addr;
+
+                        base_addr &= PT64_LVL_ADDR_MASK(iterator.level);
+                        pseudo_gfn = base_addr >> PAGE_SHIFT;
+                        sp = kvm_mmu_get_page(vcpu, pseudo_gfn, iterator.addr,
+                                              iterator.level - 1, 1, ACC_ALL);
+
+                        link_shadow_page(vcpu, iterator.sptep, sp);
+                }
+        }
+        return emulate;
+}
 ```
-=> set_spte => mmu_spte_update => mmu_spte_set => __set_spte                                设置物理页 (pfn) 起始 HPA 到 *sptep，即设置最后一级页表中某个 pte 的值
-=> rmap_add => page_header(__pa(spte))                                                      获取 spetp 所在的页表页
-            => kvm_mmu_page_set_gfn                                                         将 gfn 设置到该页表页的 gfns 中
-            => gfn_to_rmap => __gfn_to_memslot                                              获取 gfn 对应的 slot
-                           => __gfn_to_rmap => gfn_to_index                                 通过 gfn 和 slot->base_gfn，算出该页在 slot 中的 index
-                                    => slot->arch.rmap[level - PT_PAGE_TABLE_LEVEL][idx]    从该 slot 中取出对应的 rmap
-            => pte_list_add                                                                 将当前项 (spetp) 的地址加入到 rmap 中，做反向映射
-```
-
-作用于 1 级页表 (PT)。负责设置最后一级页表中的 pte(*spetp) 的值，同时将当前项 (spetp) 的地址加入到 slot->arch.rmap[level - PT_PAGE_TABLE_LEVEL][idx] 中作为反向映射，此后可以通过 gfn 快速找到该 kvm_mmu_page 。
-
-在大多数情况下，gfn 对应单个 kvm_mmu_page，于是 rmap_head 直接指向 spetp 即可。但由于一个 gfn 对应多个 kvm_mmu_page，因此在该情况下 rmap 采用链表 + 数组来维护。一个链表项 pte_list_desc 能存放三个 spetp。由于 pte_list_desc 频繁被分配，因此也是从 cache (vcpu->arch.mmu_pte_list_desc_cache) 中分配的。
-
+The implementation is divided into two parts. First is writing value to entry at target level. It is done by `mmu_set_spte`. Second is populating a new entry for non-present entry. `kvm_mmu_get_page` is responsible for this.
 
 ##### kvm_mmu_get_page
 
-获取 gfn 对应的 kvm_mmu_page 。会通过 gfn 尝试从 vcpu->kvm->arch.mmu_page_hash 中找到对应的页表页，如果以前分配过该页则直接返回即可。否则需要通过 kvm_mmu_alloc_page 从 cache 中分配，然后以 gfn 为 key 将其加到 vcpu->kvm->arch.mmu_page_hash 中。
+Get the kvm_mmu_page corresponding to gfn. It will try to find the corresponding page table page from vcpu->kvm->arch.mmu_page_hash using the gfn as a key. If the page has been allocated before, just return directly. Otherwise, it needs to be allocated from the cache through kvm_mmu_alloc_page and then added to vcpu->kvm->arch.mmu_page_hash with gfn as the key.
 
-kvm_mmu_alloc_page 会通过 mmu_memory_cache_alloc 从 vcpu->arch.mmu_page_header_cache 和 vcpu->arch.mmu_page_cache 分配 kvm_mmu_page 和 page 对象，在 mmu_topup_memory_caches 中保证了这些 cache 的充足，如果发现余量不够，会通过全局变量的 slab 补充，这点前面也提到了。
+To add a new page, we need a data structure `kvm_mmu_page`.
+```C
+arch/x86/include/asm/kvm_host.h
 
+struct kvm_mmu_page {
+        ...
+        struct hlist_node hash_link;
 
+        /*
+         * The following two entries are used to key the shadow page in the
+         * hash table.
+         */
+        gfn_t gfn;
+        union kvm_mmu_page_role role;
+
+        u64 *spt;
+        /* hold the gfn of each spte inside spt */
+        gfn_t *gfns;
+        ...
+
+        struct kvm_rmap_head parent_ptes; /* rmap pointers to parent sptes */
+
+        /* The page is obsolete if mmu_valid_gen != kvm->arch.mmu_valid_gen.  */
+        unsigned long mmu_valid_gen;
+};
+```
+
+hash_link is used as a link for hash list and spt point the allocated page. Also allocated page's page descriptor point to kvm_mmu_page. The overview of the data structure is shown in the figure below.
+![hash](hash.png)
+
+```C
+arch/x86/kvm/mmu.c
+
+static struct kvm_mmu_page *kvm_mmu_get_page(struct kvm_vcpu *vcpu,
+                                             gfn_t gfn,
+                                             gva_t gaddr,
+                                             unsigned level,
+                                             int direct,
+                                             unsigned access)
+{
+        struct kvm_mmu_page *sp;
+        ...
+        /* Iterate hash list */
+        for_each_valid_sp(vcpu->kvm, sp, gfn) {
+                if (sp->gfn != gfn) {
+                        collisions++;
+                        continue;
+                }
+
+                ...
+                /* Found the page that existed */
+                goto out;
+        }
+        /* Allocat new kvm_mmu_page */
+        ++vcpu->kvm->stat.mmu_cache_miss;
+
+        sp = kvm_mmu_alloc_page(vcpu, direct);
+
+        sp->gfn = gfn;
+        sp->role = role;
+        hlist_add_head(&sp->hash_link,
+                &vcpu->kvm->arch.mmu_page_hash[kvm_page_table_hashfn(gfn)]);
+        sp->mmu_valid_gen = vcpu->kvm->arch.mmu_valid_gen;
+        clear_page(sp->spt);
+
+        ...
+
+        return sp;
+}
+```
+In the implementation, function iterates the hashlist and check whether that page alread exist. If not allocate a `kvm_mmu_page` and insert it into the hashlist.
+
+kvm_mmu_alloc_page will allocate `kvm_mmu_page` and page objects from vcpu->arch.mmu_page_header_cache and vcpu->arch.mmu_page_cache through mmu_memory_cache_alloc. In mmu_topup_memory_caches, these global variables are guaranteed to be sufficient. If the slab is found to be insufficient, it will be supplemented Also mentioned earlier.
 
 ##### link_shadow_page
+As mentioned earlier, There is a ramp, which makes it easy to find gfn from HPA. To implemnt reverse-mapping, `kvm_mmu_page` is used. In most cases, gfn corresponds to a single kvm_mmu_page, so rmap_head directly points to spetp. However, since one gfn corresponds to multiple kvm_mmu_pages, in this case, rmap uses linked `pte_list_desc`(list + array) to maintain. It can store three spetp. Since pte_list_desc is frequently allocated, it is also allocated from the cache (vcpu->arch.mmu_pte_list_desc_cache).
 
+```C
+arch/x86/kvm/mmu.c
+
+struct pte_list_desc {
+        u64 *sptes[PTE_LIST_EXT];
+        struct pte_list_desc *more;
+};
 ```
-=> mmu_spte_set => __set_spte                               为当前页表项的值 (*spetp) 设置下一级页表页的 HPA
-=> mmu_page_add_parent_pte => pte_list_add                  将当前项的地址 (spetp) 加入到下一级页表页的 parent_ptes 中，做反向映射
+One `pte_list_desc` can store parent entries as much as PTE_LIST_EXT. When it is fulled, KVM make a new `pte_list_des` and link each other using the more member. The connection relationship of the approximate data structure is shown in the picture below.
+![rmap](./rmap.png)
+
+```C
+arch/x86/kvm/mmu.c
+
+static void link_shadow_page(struct kvm_vcpu *vcpu, u64 *sptep,
+                             struct kvm_mmu_page *sp)
+{
+        u64 spte;
+
+        spte = __pa(sp->spt) | shadow_present_mask | PT_WRITABLE_MASK |
+               shadow_user_mask | shadow_x_mask | shadow_me_mask;
+
+        if (sp_ad_disabled(sp))
+                spte |= shadow_acc_track_value;
+        else
+                spte |= shadow_accessed_mask;
+
+        /*  Set the HPA of the next-level page table page */
+        mmu_spte_set(sptep, spte);
+
+        /* Add the address of the current item (spetp) to the parent_ptes of the next page table page, and do reverse mapping */
+        mmu_page_add_parent_pte(vcpu, sp, sptep);
+
+        ...
+}
 ```
 
-作用于 2-4 级页表 (PML4 - PDT)，在遍历过程中如果发现下一级页表缺页，需要在分配一个页表页后更新当前的迭代器指向的页表项 (spetp)，设置为下一级该页表页的 HPA，这样下次就能够通过页表项访问到该页表页了。同时需要将当前页表项 (spetp) 的地址加入到下一级页表页的 parent_ptes 中作为反向映射。
 
-利用两套反向映射，在右移 GPA 算出 gfn 后，可以通过 rmap 得到在 L1 中的页表项，然后通过 parent_ptes 可以依次得到在 L2-4 中的页表项。当 Host 需要将 Guest 的某个 GPA 的 page 换出时，直接通过反向索引找到该 gfn 相关的页表项进行修改，而无需再次走 EPT 查询。
+##### mmu_set_spt
+Responsible for setting the value of pte(*spetp) in the last-level page table. Also, add the address of the current item (spetp) to `kvm_rmap_head` for a reverse mapping.
+
+```C
+static int mmu_set_spte(struct kvm_vcpu *vcpu, u64 *sptep, unsigned pte_access,
+                        int write_fault, int level, gfn_t gfn, kvm_pfn_t pfn,
+                        bool speculative, bool host_writable)
+{
+        int was_rmapped = 0;
+        int rmap_count;
+        int ret = RET_PF_RETRY;
+        ...
+
+        /* Set physical page (pfn) starting HPA to *sptep, that is, set the value of a pte in the last-level page table
+         * => set_spte
+         *   => mmu_spte_update
+         *     => mmu_spte_set
+         *       => __set_spte
+         */
+        if (set_spte(vcpu, sptep, pte_access, level, gfn, pfn, speculative,
+              true, host_writable)) {
+                if (write_fault)
+                        ret = RET_PF_EMULATE;
+                kvm_make_request(KVM_REQ_TLB_FLUSH, vcpu);
+        }
+        ...
+
+        if (is_shadow_present_pte(*sptep)) {
+                if (!was_rmapped) {
+                        /*
+                         * => rmap_add
+                         *   => page_header(__pa(spte)): Get the page table page where spetp is located
+                         *   => kvm_mmu_page_set_gfn: set gfn to the gfns of the page table page
+                         *   => gfn_to_rmap
+                         *   => pte_list_add: adds the address of the current item (spetp) to rmap for reverse mapping
+                         */
+                        rmap_count = rmap_add(vcpu, sptep, gfn);
+                        if (rmap_count > RMAP_RECYCLE_THRESHOLD)
+                                rmap_recycle(vcpu, sptep, gfn);
+                }
+        }
+        ...
+}
+```
 
 
 
 
 
-
-## 总结
+## Summarize
 
 ### QEMU
-创建一系列 MemoryRegion ，分别表示 Guest 中的 ROM、RAM 等区域。 MemoryRegion 之间通过 alias 或 subregion 的方式维护相互之间的关系，从而进一步细化区域的定义。
+Create a series of MemoryRegion, respectively representing the ROM, RAM and other areas in the Guest. MemoryRegion maintains the relationship between each other through alias or subregion, so as to further refine the definition of the region.
 
-对于一个实体 MemoryRegion(非 alias)，在初始化内存的过程中会创建它所对应的 RAMBlock 。 RAMBlock 通过 mmap 的方式从 QEMU 的进程空间中分配内存，并负责维护该 MemoryRegion 管理内存的起始 HVA/GPA/size 等信息。
+For an entity MemoryRegion (non-alias), its corresponding RAMBlock will be created during the process of initializing the memory. RAMBlock allocates memory from the process space of QEMU through mmap, and is responsible for maintaining the starting HVA/GPA/size information of the MemoryRegion management memory.
 
-AddressSpace 表示 VM 的物理地址空间。如果 AddressSpace 中的 MemoryRegion 发生变化，则 listener 被触发，将所属 AddressSpace 的 MemoryRegion 树展平，形成一维的 FlatView ，比较 FlatRange 是否发生了变化。如果是调用相应方法如 region_add 对变化的 section region 进行检查，更新 QEMU 内的 KVMSlot，同时填充 kvm_userspace_memory_region 结构，作为 ioctl 的参数更新 KVM 中的 kvm_memory_slot 。
-
+AddressSpace represents the physical address space of the VM. If the MemoryRegion in the AddressSpace changes, the listener is triggered to flatten the MemoryRegion tree of the AddressSpace to which it belongs to form a one-dimensional FlatView, and compare whether the FlatRange has changed. If it is to call the corresponding method such as region_add to check the changed section region, update the KVMSlot in QEMU, and fill in the kvm_userspace_memory_region structure at the same time, update the kvm_memory_slot in KVM as an ioctl parameter.
 
 ### KVM
-当 QEMU 通过 ioctl 创建 vcpu 时，调用 kvm_mmu_create 初始化 mmu 相关信息，为页表项结构分配 slab cache。
+When QEMU creates vcpu through ioctl, it calls kvm_mmu_create to initialize mmu related information and allocates slab cache for the page table entry structure.
 
-当 KVM 要进入 Guest 前， vcpu_enter_guest => kvm_mmu_reload 会将根级页表地址加载到 VMCS，让 Guest 使用该页表。
+Before KVM enters the guest, vcpu_enter_guest => kvm_mmu_reload will load the root-level page table address into the VMCS and let the guest use the page table.
 
-当 EPT Violation 发生时， VMEXIT 到 KVM 中。如果是缺页，则拿到对应的 GPA ，根据 GPA 算出 gfn，根据 gfn 找到对应的 memory slot ，得到对应的 HVA 。然后根据 HVA 找到对应的 pfn，确保该 page 位于内存。在把缺的页填上后，需要更新 EPT，完善其中缺少的页表项。于是从 L4 开始，逐层补全页表，对于在某层上缺少的页表页，会从 slab 中分配后将新页的 HPA 填入到上一级页表中。
+When EPT Violation occurs, VMEXIT is triggered. To handle this, get the corresponding GPA, calculate the gfn according to the GPA, find the corresponding memory slot according to the gfn, and get the corresponding HVA. Then find the corresponding pfn according to the HVA and make sure that the page is in the memory. After filling in the missing pages, the EPT needs to be updated to complete the missing page table entries. So starting from L4, the page table is completed level by level. For the page table pages that are missing on a certain level, the HPA of the new page will be filled into the upper level page table after being allocated from the slab.
 
-除了建立上级页表到下级页表的关联外，KVM 还会建立反向映射，可以直接根据 GPA 找到 gfn 相关的页表项，而无需再次走 EPT 查询。
-
+In addition to establishing the association between the upper-level page table and the lower-level page table, KVM will also establish a reverse mapping, which can directly find the gfn-related page table entries based on the GPA without having to go through the EPT query again.
