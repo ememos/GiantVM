@@ -132,11 +132,11 @@ struct AddressSpace {
     bool malloced;
 
     /* Accessed via RCU.  */
-    struct FlatView *current_map;                               // 指向当前维护的 FlatView，在 address_space_update_topology 时作为 old 比较
+    struct FlatView *current_map;                               // Point to the currently maintained FlatView, compare it as old when address_space_update_topology
 
     int ioeventfd_nb;
     struct MemoryRegionIoeventfd *ioeventfds;
-    struct AddressSpaceDispatch *dispatch;                      // 负责根据 GPA 找到 HVA
+    struct AddressSpaceDispatch *dispatch;                      // Responsible for finding HVA based on GPA
     struct AddressSpaceDispatch *next_dispatch;
     MemoryListener dispatch_listener;
     QTAILQ_HEAD(memory_listeners_as, MemoryListener) listeners;
@@ -144,12 +144,12 @@ struct AddressSpace {
 };
 ```
 
-顾名思义，用来表示虚拟机的一片地址空间，如内存地址空间，IO 地址空间。每个 AddressSpace 一般包含一系列 MemoryRegion ： AddressSpace 的 root 指向根级 MemoryRegion ，该 MemoryRegion 有可能有自己的若干个 subregion ，于是形成树状结构。
+As the name suggests, this data structure represents address space of virtual machine such as memory address space and I/O address space. Normally, each address space include a serise of MemoryRegions. The valiable "root" that is implemented tree structure, points to the root-level node of Memory Region, which may have several subregions of its own.
 
-如上文所述，在内存初始化流程中调用了 memory_map_init ，其初始化了 address_space_memory 和 address_space_io ，其中：
+As mentioned above, memory_map_init is called in the memory initialization process, which initializes address_space_memory and address_space_io, here：
 
-* address_space_memory 的 root 为 system_memory
-* address_space_io 的 root 为 system_io
+* The root of address_space_memory is system_memory
+* The root of address_space_io is system_io
 
 
 
