@@ -269,20 +269,20 @@ At the same time, map AddressSpace to FlatView to get several MemoryRegionSectio
 
 ```c
 struct MemoryRegionSection {
-    MemoryRegion *mr;                           // 指向所属 MemoryRegion
-    AddressSpace *address_space;                // 所属 AddressSpace
-    hwaddr offset_within_region;                // 起始地址 (HVA) 在 MemoryRegion 内的偏移量
+    MemoryRegion *mr;                           // Point to the owning MemoryRegion
+    AddressSpace *address_space;                // Belonging to AddressSpace
+    hwaddr offset_within_region;                // The offset of the starting address (HVA) within the MemoryRegion
     Int128 size;
-    hwaddr offset_within_address_space;         // 在 AddressSpace 内的偏移量，如果该 AddressSpace 为系统内存，则为 GPA 起始地址
+    hwaddr offset_within_address_space;         // The offset within the AddressSpace, if the AddressSpace is system memory, it is the GPA starting address
     bool readonly;
 };
 ```
 
-MemoryRegionSection 指向 MemoryRegion 的一部分 ([offset_within_region, offset_within_region + size])，是注册到 KVM 的基本单位。
+MemoryRegionSection points to a part of MemoryRegion ([offset_within_region, offset_within_region + size]), which is the basic unit of registration to KVM.
 
-将 AddressSpace 中的 MemoryRegion 映射到线性地址空间后，由于重叠的关系，原本完整的 region 可能会被切分成片段，于是产生了 MemoryRegionSection。
+MemoryRegionSection points to a part of MemoryRegion ([offset_within_region, offset_within_region + size]), which is the basic unit of registration to KVM.
 
-回头再看内存初始化的流程，做的工作很简单：创建一些 AddressSpace ，绑定 listener 。创建相应的 MemoryRegion，作为 AddressSpace 的根。最后提交修改，让地址空间的发生变化，更新到 KVM 中。下面将分点介绍。
+Looking back at the memory initialization process, the job is very simple. create some AddressSpace and bind listener. Create the corresponding MemoryRegion as the root of the AddressSpace. Finally, submit the modification to change the address space and update it to KVM. The following will be divided into points.
 
 
 
