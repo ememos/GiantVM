@@ -215,19 +215,19 @@ pc_init1 / pc_q35_init => pc_memory_init => memory_region_allocate_system_memory
 
 ##### memory_region_allocate_system_memory
 
-对于非 NUMA 架构的 VM ，直接分配内存
+For non-NUMA-based VMs, directly allocate memory
 
 ```
-=> allocate_system_memory_nonnuma => memory_region_init_ram_from_file / memory_region_init_ram          分配 MemoryRegion 对应 Ramblock 的内存
-=> vmstate_register_ram                                                                                 根据 region 的名称 name 设置 RAMBlock 的 idstr
+=> allocate_system_memory_nonnuma => memory_region_init_ram_from_file / memory_region_init_ram          Allocate MemoryRegion corresponding to Ramblock memory
+=> vmstate_register_ram                                                                                 Set the idstr of the RAMBlock according to the name of the region
 ```
 
-对于 NUMA，分配后需要设置 HostMemoryBackend
+For NUMA, HostMemoryBackend needs to be set after allocation
 
 ```
 => memory_region_init
-=> memory_region_add_subregion                          遍历所有 NUMA 节点的内存 HostMemoryBackend ，依次把那些 mr 成员不为空的作为当前 MemoryRegion 的 subregion，偏移量从 0 开始递增
-=> vmstate_register_ram_global => vmstate_register_ram  根据 region 的名称 name 设置 RAMBlock 的 idstr
+=> memory_region_add_subregion                          Traverse the memory HostMemoryBackend of all NUMA nodes, and use those whose mr members are not empty as subregions of the current MemoryRegion, and the offset starts from 0 to increase
+=> vmstate_register_ram_global => vmstate_register_ram  Set the idstr of the RAMBlock according to the name of the region
 ```
 
 ##### MemoryRegion 类型
