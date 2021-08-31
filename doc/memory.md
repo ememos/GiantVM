@@ -1,67 +1,64 @@
-## 基础
+## Base
 
-### 页表
-负责将 VA 转换为 PA。VA 的地址由页号和页内偏移量组成，转换时，先从页表的基地址寄存器 (CR3) 中读取页表的起始地址，然后加上页号得到对应页的页表项。从中取出页的物理地址，再加上偏移量得到 PA。
+### Page table
+Responsible for converting VA to PA. The address of VA is composed of the page number and the offset within the page. When converting, first read the starting address of the page table from the base address register (CR3) of the page table, and then add the page number to get the page table entry of the corresponding page. Take the physical address of the page from it and add the offset to get the PA.
 
-随着寻址范围的扩大 (64 位 CPU 支持 48 位的虚拟地址寻址空间，和 52 位的物理地址寻址空间)，页表需要占用越来越多连续的内存空间，再加上每个进程都要有自己的页表，系统光是维护页表就需要耗费大量内存。为此，利用程序使用内存的局部化特征，引进了多级页表。
+With the expansion of the addressing range (64-bit CPU supports 48-bit virtual address addressing space and 52-bit physical address addressing space), page tables need to occupy more and more contiguous memory space, plus each Processes must have their own page tables, and the system needs to consume a lot of memory just to maintain the page tables. To this end, a multi-level page table is introduced by taking advantage of the localized characteristics of the memory used by the program.
 
-目前版本的 Linux 使用了四级页表：
+The current version of Linux uses four-level page tables:
 
 Page Map Level 4(PML4) => Page Directory Pointer Table(PDPT) => Page Directory(PD) => Page Table(PT)
 
-在某些地方被称为： Page Global Directory(PGD) => Page Upper Directory(PUD) => Page Middle Directory(PMD) => Page Table(PT)
+It is called in some places: Page Global Directory(PGD) => Page Upper Directory(PUD) => Page Middle Directory(PMD) => Page Table(PT)
 
-在 x86_64 下，一个普通 page 的大小为 4KB，由于地址为 64bit，因此一个页表项占 8 Byte，于是一张页表中只能存放 512 个表项。因此每级页表索引使用 9 个 bit，加上页内索引 (offset) 使用 12 个 bit，因此一个 64bit 地址中只有 0-47bit 被用到。
+Under x86_64, the size of an ordinary page is 4KB. Since the address is 64bit, a page table entry occupies 8 Bytes, so a page table can only store 512 entries. Therefore, each level of page table index uses 9 bits, and the page index (offset) uses 12 bits, so only 0-47 bits in a 64-bit address are used.
 
-在 64 位下，EPT 采用了和传统页表相同的结构，于是如果不考虑 TLB，进行一次 GVA 到 HVA 需要经过 4 * 4 次 (考虑访问每一级 page 都 fault 的情况) 页表查询。
+In 64-bit, EPT uses the same structure as the traditional page table, so if you do not consider TLB, a GVA to HVA needs to go through 4 * 4 times (considering the situation that access to each level of page is faulty) page table query.
 
-有多少次查询就要访问多少次内存，在 walk 过程中不断对内存进行访问无疑会对性能造成影响。为此引入 TLB(Translation Lookaside Buffer) ，用来缓存常用的 PTE。这样在 TLB 命中的情况下就无需到内存去进行查找了。利用程序使用内存的局部化特征，TLB 的命中率往往很高，改善了在多级页表下的的访问速度。
-
-
+The memory is accessed as many times as there are queries, and continuous access to the memory during the walk will undoubtedly affect performance. To this end, TLB(Translation Lookaside Buffer) is introduced to cache commonly used PTEs. In this way, in the case of a TLB hit, there is no need to search the memory. Utilizing the localized characteristics of the memory used by the program, the hit rate of TLB is often very high, which improves the access speed under the multi-level page table.
 
 
-### 内存虚拟化
-QEMU 利用 mmap 系统调用，在进程的虚拟地址空间中申请连续的大小的空间，作为 Guest 的物理内存。
+### Memory virtualization
+QEMU uses the mmap system call to apply for a continuous size of space in the virtual address space of the process as the guest's physical memory.
 
-在这样的架构下，内存地址访问有四层映射：
+Under this architecture, there are four levels of mapping for memory address access:
 
 GVA - GPA - HVA - HPA
 
-GVA - GPA 的映射由 guest OS 负责维护，而 HVA - HPA 由 host OS 负责维护。于是我们需要一种机制，来维护 GPA - HVA 的映射。常用的实现有 SPT(Shadow Page Table) 和 EPT/NPT ，前者通过软件维护影子页表，后者通过硬件特性实现二级映射。
+The GVA-GPA mapping is maintained by the guest OS, and the HVA-HPA is maintained by the host OS. So we need a mechanism to maintain the GPA-HVA mapping. Commonly used implementations are SPT(Shadow Page Table) and EPT/NPT. The former maintains the shadow page table through software, and the latter implements secondary mapping through hardware features.
 
 
-### 影子页表
-KVM 通过维护 GVA 到 HPA 的页表 SPT ，实现了直接映射。于是页表可被物理 MMU 寻址使用。如何实现的呢：
+### Shadow page table
+KVM realizes direct mapping by maintaining the page table SPT from GVA to HPA. Then the page table can be used by physical MMU addressing. How to achieve it:
 
-KVM 将 Guest OS 的页表设置为 read-only ，当 Guest OS 进行修改时会触发 page fault， VMEXIT 到 KVM 。 KVM 会对 GVA 对应的页表项进行访问权限检查，结合错误码进行判断:
+KVM sets the page table of the Guest OS to read-only. When the Guest OS makes changes, it will trigger a page fault, VMEXIT to KVM. KVM will check the access authority of the page table entry corresponding to the GVA, and judge based on the error code:
 
-1. 如果是由 Guest OS 引起的，则将该异常注入回去。 Guest OS 调用自己的 page fault 处理函数 (申请一个 page ，将 page 的 GPA 填充到 上级页表项中)
-2. 如果是 Guest OS 的页表和 SPT 不一致引起的，则同步 SPT ，根据 Guest OS 页表和 mmap 映射找到 GVA 到 GPA 再到 HVA 的映射关系，然后在 SPT 中增加 / 更新 GVA - HPA 的表项
+1. If it is caused by the Guest OS, the exception is injected back. Guest OS calls its own page fault processing function (apply for a page and fill the GPA of the page into the upper-level page table entry)
+2. If it is caused by the inconsistency between the page table of the Guest OS and the SPT, synchronize the SPT, find the mapping relationship between GVA to GPA and then to HVA according to the Guest OS page table and mmap mapping, and then add/update GVA-HPA entries in the SPT
 
-当 Guest OS 切换进程时，会把待切换进程的页表基址载入 Guest 的 CR3，导致 VM EXIT 回到 KVM。KVM 通过哈希表找到对应的 SPT ，然后加载机器的 CR3 中。
+When the Guest OS switches the process, it loads the base address of the page table of the process to be switched into CR3 of the Guest, causing VM EXIT to return to KVM. KVM finds the corresponding SPT through the hash table, and then loads it into the machine's CR3.
 
-缺点：需要为每个进程都维护一张 SPT ，带来额外的内存开销。需要保持 Guest OS 页表和 SPT 的同步。每当 Guest 发生 page fault ，即使是 guest 自身缺页导致的，都会导致 VMExit ，开销大。
+Disadvantages: It is necessary to maintain an SPT for each process, which brings additional memory overhead. Need to keep the guest OS page table and SPT synchronized. Whenever a guest page fault occurs, even if it is caused by the guest's own page fault, it will cause VMExit, which is expensive.
 
 
 ### EPT / NPT
-Intel EPT 技术 引入了 EPT(Extended Page Table) 和 EPTP(EPT base pointer) 的概念。 EPT 中维护着 GPA 到 HPA 的映射，而 EPT base pointer 负责指向 EPT 。在 Guest OS 运行时，该 VM 对应的 EPT 地址被加载到 EPTP ，而 Guest OS 当前运行的进程页表基址被加载到 CR3 ，于是在进行地址转换时，首先通过 CR3 指向的页表实现 GVA 到 GPA 的转换，再通过 EPTP 指向的 EPT 实现从 GPA 到 HPA 的转换。
+Intel EPT technology introduces the concepts of EPT(Extended Page Table) and EPTP(EPT base pointer). The mapping from GPA to HPA is maintained in the EPT, and the EPT base pointer is responsible for pointing to the EPT. When the Guest OS is running, the EPT address corresponding to the VM is loaded into EPTP, and the base address of the currently running process page table of the Guest OS is loaded into CR3, so when the address conversion is performed, the GVA is first realized through the page table pointed to by CR3. The conversion of GPA, and then the conversion from GPA to HPA is realized through the EPT pointed to by EPTP.
 
-在发生 EPT page fault 时，需要 VMExit 到 KVM，更新 EPT 。
+When an EPT page fault occurs, VMExit is required to KVM to update the EPT.
 
-AMD NPT(Nested Page Table) 是 AMD 搞出的解决方案，它原理和 EPT 类似，但描述和实现上略有不同。Guest OS 和 Host 都有自己的 CR3 。当进行地址转换时，根据 gCR3 指向的页表从 GVA 到 GPA ，然后根据 nCR3 指向的页表从 GPA 到 HPA 。
+AMD NPT(Nested Page Table) is a solution developed by AMD. Its principle is similar to EPT, but the description and implementation are slightly different. Both Guest OS and Host have their own CR3. When the address is converted, the page table pointed to by gCR3 is from GVA to GPA, and then the page table pointed to by nCR3 is from GPA to HPA.
 
-优点：Guest 的缺页在 guest 内处理，不会 vm exit。地址转换基本由硬件 (MMU) 查页表完成。
+Advantages: The guest's page faults are handled in the guest, and the vm exit will not be performed. The address conversion is basically done by the hardware (MMU) looking up the page table.
 
-缺点：两级页表查询，只能寄望于 TLB 命中。
-
-
+Disadvantages: The two-level page table query can only be expected to be hit by the TLB.
 
 
-## 实现
+
+## Accomplishment
 
 ### QEMU
 
-#### 内存设备模拟
+#### Memory device simulation
 
 ##### PCDIMMDevice
 
@@ -71,14 +68,14 @@ typedef struct PCDIMMDevice {
     DeviceState parent_obj;
 
     /* public */
-    uint64_t addr;                  // 映射到的起始 GPA
-    uint32_t node;                  // 映射到的 numa 节点
-    int32_t slot;                   // 插入的内存槽编号，默认为 -1，表示自动分配
-    HostMemoryBackend *hostmem;     // 对应的 backend
+    uint64_t addr;                   // The starting GPA mapped to
+    uint32_t node;                   // The numa node mapped to
+    int32_t slot;                    // The number of the inserted memory slot, the default is -1, which means that the
+    HostMemoryBackend *hostmem;      // Corresponding backend
 } PCDIMMDevice;
 ```
 
-通过 QOM(qemu object model) 定义的虚拟内存条。可通过 QMP 或 QEMU 命令行进行管理。通过增加 / 移除该对象实现 VM 中内存的热插拔。
+A virtual memory bank defined by QOM(qemu object model). It can be managed through QMP or QEMU command line. By adding/removing this object, the memory in the VM can be hot-plugged.
 
 
 ##### HostMemoryBackend
@@ -89,36 +86,36 @@ struct HostMemoryBackend {
     Object parent;
 
     /* protected */
-    uint64_t size;                                  // 提供内存大小
+    uint64_t size;           // Provide memory size
     bool merge, dump;
     bool prealloc, force_prealloc, is_mapped;
     DECLARE_BITMAP(host_nodes, MAX_NODES + 1);
     HostMemPolicy policy;
 
-    MemoryRegion mr;                                // 拥有的 MemoryRegion
+    MemoryRegion mr;         // Owned MemoryRegion
 };
 ```
 
-通过 QOM 定义的一段 Host 内存，为虚拟内存条提供内存。可通过 QMP 或 QEMU 命令行进行管理。
+A section of Host memory defined by QOM provides memory for virtual memory sticks. It can be managed through QMP or QEMU command line.
 
 
-#### 内存初始化
+#### Memory initialization
 
-在开启 KVM 的前提下， QEMU 通过以下流程初始化内存：
-
+On the premise that KVM is turned on, QEMU initializes the memory through the following process:
 
 ```
-main => configure_accelerator => kvm_init => kvm_memory_listener_register(s, &s->memory_listener, &address_space_memory, 0) 初始化
+main => configure_accelerator => kvm_init => kvm_memory_listener_register(s, &s->memory_listener, &address_space_memory, 0) initialization
 kvm_state.memory_listener
-                                          => kml->listener.region_add = kvm_region_add                      为 listener 设置操作
-                                          => memory_listener_register                                       初始化 listener 并绑定到 address_space_memory
-                                          => memory_listener_register(&kvm_io_listener, &address_space_io)  初始化 kvm_io_listener 并绑定到 address_space_io
-     => cpu_exec_init_all => memory_map_init                                        创建 system_memory("system") 和 system_io("io") 两个全局 MemoryRegion
-                                 => address_space_init                              初始化 address_space_memory("memory") 和 address_space_io("I/O") AddressSpace，并把 system_memory 和 system_io 作为 root
-                                    => memory_region_transaction_commit             提交修改，引起地址空间的变化
+                                          => kml->listener.region_add = kvm_region_add                      sets the operation for the listener
+                                          => memory_listener_register                                       initializes the listener and binds it to address_space_memory
+                                          => memory_listener_register(&kvm_io_listener, &address_space_io)  initialize kvm_io_listener and bind to address_space_io
+     => cpu_exec_init_all => memory_map_init                                        creates system_memory("system") and system_io("io") two global MemoryRegion
+                                 => address_space_init                              initialize address_space_memory("memory") and address_space_io("I/O") AddressSpace, and use system_memory and system_io as root
+                                    => memory_region_transaction_commit             commits the modification, causing a change in the address space
 ```
 
-在进行进一步分析之前，我们先介绍下涉及的三种结构： AddressSpace 、 MemoryRegion 和 MemoryRegionSection ：
+Before further analysis, we first introduce the three structures involved: AddressSpace, MemoryRegion and MemoryRegionSection:
+
 
 #### AddressSpace
 
@@ -131,12 +128,12 @@ struct AddressSpace {
     int ref_count;
     bool malloced;
 
-    /* Accessed via RCU.  */
-    struct FlatView *current_map;                               // Point to the currently maintained FlatView, compare it as old when address_space_update_topology
+    /* Accessed via RCU.   */
+    struct FlatView *current_map;                                // Point to the currently maintained FlatView, compared as old in address_space_update_topology
 
     int ioeventfd_nb;
     struct MemoryRegionIoeventfd *ioeventfds;
-    struct AddressSpaceDispatch *dispatch;                      // Responsible for finding HVA based on GPA
+    struct AddressSpaceDispatch *dispatch;                       // Responsible for finding HVA according to GPA
     struct AddressSpaceDispatch *next_dispatch;
     MemoryListener dispatch_listener;
     QTAILQ_HEAD(memory_listeners_as, MemoryListener) listeners;
@@ -144,13 +141,12 @@ struct AddressSpace {
 };
 ```
 
-As the name suggests, this data structure represents address space of virtual machine such as memory address space and I/O address space. Normally, each address space include a serise of MemoryRegions. The valiable "root" that is implemented tree structure, points to the root-level node of Memory Region, which may have several subregions of its own.
+As the name implies, it is used to represent a piece of address space of a virtual machine, such as memory address space and IO address space. Each AddressSpace generally contains a series of MemoryRegions: The root of the AddressSpace points to the root-level MemoryRegion, which may have several subregions of its own, thus forming a tree structure.
 
-As mentioned above, memory_map_init is called in the memory initialization process, which initializes address_space_memory and address_space_io, here：
+As mentioned above, memory_map_init is called in the memory initialization process, which initializes address_space_memory and address_space_io, where:
 
-* The root of address_space_memory is system_memory
-* The root of address_space_io is system_io
-
+* The root of address_space_memory is system_memory.
+* The root of address_space_io is system_io.
 
 
 #### MemoryRegion
