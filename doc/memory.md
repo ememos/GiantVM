@@ -358,7 +358,7 @@ These operations include: enabling, destructuring, adding and deleting eventfd, 
 => ++memory_region_transaction_depth
 ```
 
-KVM 中对某些 MMIO 做了 batch 优化：KVM 遇到 MMIO 而 VMEXIT 时，将 MMIO 操作记录到 kvm_coalesced_mmio 结构中，然后塞到 kvm_coalesced_mmio_ring 中，不退出到 QEMU 。直到某一次退回到 QEMU ，要更新内存空间之前的那一刻，把 kvm_coalesced_mmio_ring 中的 kvm_coalesced_mmio 取出来做一遍，保证内存的一致性。这事就是 kvm_flush_coalesced_mmio_buffer 干的。
+KVM has done batch optimization for some MMIO: When KVM encounters MMIO and VMEXIT, it records the MMIO operation in the kvm_coalesced_mmio structure, and then stuffs it into the kvm_coalesced_mmio_ring without exiting to QEMU. Until you return to QEMU one time, the moment before you want to update the memory space, take out the kvm_coalesced_mmio in kvm_coalesced_mmio_ring and do it again to ensure memory consistency. This is what kvm_flush_coalesced_mmio_buffer does.
 
 
 ##### memory_region_transaction_commit
