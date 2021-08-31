@@ -365,13 +365,13 @@ KVM has done batch optimization for some MMIO: When KVM encounters MMIO and VMEX
 
 ```
 => --memory_region_transaction_depth
-=> 如果 memory_region_transaction_depth 为 0 且 memory_region_update_pending 大于 0
-    => MEMORY_LISTENER_CALL_GLOBAL(begin, Forward)        从前向后调用全局列表 memory_listeners 中所有 listener 的 begin 函数
-    => 对 address_spaces 中的所有 address space，调用 address_space_update_topology ，更新 QEMU 和 KVM 中维护的 slot 信息。
-    => MEMORY_LISTENER_CALL_GLOBAL(commit, Forward)       从后向前调用全局列表 memory_listeners 中所有 listener 的 commit 函数
+=> 如果 memory_region_transaction_depth        Is 0 and memory_region_update_pending is greater than 0
+    => MEMORY_LISTENER_CALL_GLOBAL(begin, Forward)        Call the begin function of all listeners in the global list memory_listeners from front to back
+    => 对 address_spaces 中的所有 address space，调用 address_space_update_topology ，Update the slot information maintained in QEMU and KVM.
+    => MEMORY_LISTENER_CALL_GLOBAL(commit, Forward)       Call the commit function of all listeners in the global list memory_listeners from back to front
 ```
 
-调用 listener 对应的函数来实现对地址空间的更新。
+Call the corresponding function of listener to update the address space.
 
 ##### address_space_update_topology
 
