@@ -230,15 +230,15 @@ For NUMA, HostMemoryBackend needs to be set after allocation
 => vmstate_register_ram_global => vmstate_register_ram  Set the idstr of the RAMBlock according to the name of the region
 ```
 
-##### MemoryRegion 类型
+##### MemoryRegion Type
 
-可将 MemoryRegion 划分为以下三种类型：
+MemoryRegion could be divided into the following three types：
 
-* 根级 MemoryRegion: 直接通过 memory_region_init 初始化，没有自己的内存，用于管理 subregion。如 system_memory
-* 实体 MemoryRegion: 通过 memory_region_init_ram 初始化，有自己的内存 (从 QEMU 进程地址空间中分配)，大小为 size 。如 ram_memory(pc.ram) 、 pci_memory(pci) 等
-* 别名 MemoryRegion: 通过 memory_region_init_alias 初始化，没有自己的内存，表示实体 MemoryRegion(如 pc.ram) 的一部分，通过 alias 成员指向实体 MemoryRegion，alias_offset 为在实体 MemoryRegion 中的偏移量。如 ram_below_4g 、ram_above_4g 等
+* Root-level MemoryRegion: It is initialized directly through memory_region_init without its own memory, which is used to manage subregions. Such as system_memory.
+* Root-level MemoryRegion: It is initialized directly through memory_region_init without its own memory, which is used to manage subregions. Such as system_memory.
+* Root-level MemoryRegion: It is initialized directly through memory_region_init without its own memory, which is used to manage subregions. Such as system_memory.
 
-代码中常见的 MemoryRegion 关系为：
+The common MemoryRegion relationship in the code is：
 
 ```
                   alias
@@ -254,7 +254,7 @@ system_io(io) - (pci0-io)
                      sub
 system_memory(system) - ram_below_4g(ram-below-4g)
                       - ram_above_4g(ram-above-4g)
-                      - pcms->hotplug_memory.mr        热插拔内存
+                      - pcms->hotplug_memory.mr        Hot-swappable memory
 
           sub
 rom_memory - isa_bios(isa-bios)
@@ -262,7 +262,7 @@ rom_memory - isa_bios(isa-bios)
 
 ```
 
-同时将 AddressSpace 映射到 FlatView ，得到若干个 MemoryRegionSection ，调用 kvm_region_add ，将 MemoryRegionSection 注册到 KVM 中。
+At the same time, map AddressSpace to FlatView to get several MemoryRegionSections, call kvm_region_add to register MemoryRegionSection in KVM.
 
 
 ##### MemoryRegionSection
