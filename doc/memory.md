@@ -157,7 +157,7 @@ As mentioned above, memory_map_init is called in the memory initialization proce
 
 ```c
 struct MemoryRegion {
-    Object parent_obj;                                                  // 继承自 Object
+    Object parent_obj;                                                  // Inherited from Object
 
     /* All fields are private - violators will be prosecuted */
 
@@ -166,19 +166,19 @@ struct MemoryRegion {
     bool ram;
     bool subpage;
     bool readonly; /* For RAM regions */
-    bool rom_device;                                                    // 是否只读
+    bool rom_device;                                                    // Read-only
     bool flush_coalesced_mmio;
     bool global_locking;
-    uint8_t dirty_log_mask;                                             // dirty map 类型
-    RAMBlock *ram_block;                                                // 指向对应的 RAMBlock
+    uint8_t dirty_log_mask;                                             // dirty map type
+    RAMBlock *ram_block;                                                // Point to the corresponding RAMBlock
     Object *owner;
     const MemoryRegionIOMMUOps *iommu_ops;
 
     const MemoryRegionOps *ops;
     void *opaque;
-    MemoryRegion *container;                                            // 指向父 MemoryRegion
-    Int128 size;                                                        // 内存区域大小
-    hwaddr addr;                                                        // 在父 MemoryRegion 中的偏移量 (见 memory_region_add_subregion_common)
+    MemoryRegion *container;                                            // Points to the parent MemoryRegion
+    Int128 size;                                                        // Memory area size
+    hwaddr addr;                                                        // The offset in the parent MemoryRegion (see memory_region_add_subregion_common)
     void (*destructor)(MemoryRegion *mr);
     uint64_t align;
     bool terminates;
@@ -186,10 +186,11 @@ struct MemoryRegion {
     bool enabled;
     bool warning_printed; /* For reservations */
     uint8_t vga_logging_count;
-    MemoryRegion *alias;                                                // 指向实体 MemoryRegion
-    hwaddr alias_offset;                                                // 起始地址 (GPA) 在实体 MemoryRegion 中的偏移量
+    MemoryRegion *alias;                                                // Points to the entity MemoryRegion
+    hwaddr alias_offset;                                                // The offset of the starting address (GPA) in the entity MemoryRegion
     int32_t priority;
-    QTAILQ_HEAD(subregions, MemoryRegion) subregions;                   // subregion 链表
+    QTAILQ_HEAD(subregions, MemoryRegion) subregions;                   // subregion linked list
+    QTAILQ_ENTRY(MemoryRegion) subregions_link;
     QTAILQ_ENTRY(MemoryRegion) subregions_link;
     QTAILQ_HEAD(coalesced_ranges, CoalescedMemoryRange) coalesced;
     const char *name;
@@ -200,15 +201,15 @@ struct MemoryRegion {
 };
 ```
 
-MemoryRegion 表示在 Guest memory layout 中的一段内存，具有逻辑 (Guest) 意义。
+Memory Region represents a section of memory in the Guest memory layout and has a logical (Guest) meaning.
 
-在初始化 VM 的过程中，建立了相应的 MemoryRegion ：
+In the process of initializing the VM, the corresponding MemoryRegion is established:
 
 ```
-pc_init1 / pc_q35_init => pc_memory_init => memory_region_allocate_system_memory                        初始化 MemoryRegion 并为其分配内存
-                                         => memory_region_init_alias => memory_region_init              初始化 alias MemoryRegion
-                                         => memory_region_init                                          初始化 MemoryRegion
-                                         => memory_region_init_ram => memory_region_init                初始化 MemoryRegion 并分配 Ramblock
+pc_init1 / pc_q35_init => pc_memory_init => memory_region_allocate_system_memory                        Initialize MemoryRegion and allocate memory for it
+                                         => memory_region_init_alias => memory_region_init              Initialize alias MemoryRegion
+                                         => memory_region_init                                          Initialize MemoryRegion
+                                         => memory_region_init_ram => memory_region_init                Initialize MemoryRegion and allocate Ramblock
 ```
 
 
