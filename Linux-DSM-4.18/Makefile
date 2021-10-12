@@ -2,7 +2,7 @@
 VERSION = 4
 PATCHLEVEL = 18
 SUBLEVEL = 20
-EXTRAVERSION = -gvm-monitor
+EXTRAVERSION = -gvm
 NAME = Merciless Moray
 
 # *DOCUMENTATION*
