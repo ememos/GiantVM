@@ -7473,7 +7473,6 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 {
 	unsigned long exit_qualification;
 	gpa_t gpa;
-	gva_t gva;
 	u64 error_code;
 
 	exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
@@ -7490,7 +7489,6 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 		vmcs_set_bits(GUEST_INTERRUPTIBILITY_INFO, GUEST_INTR_STATE_NMI);
 
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
-	gva = vmcs_readl(GUEST_LINEAR_ADDRESS);
 	trace_kvm_page_fault(gpa, exit_qualification);
 
 	/* Is it a read fault? */
@@ -7510,13 +7508,6 @@ static int handle_ept_violation(struct kvm_vcpu *vcpu)
 
 	error_code |= (exit_qualification & 0x100) != 0 ?
 	       PFERR_GUEST_FINAL_MASK : PFERR_GUEST_PAGE_MASK;
-
-	printk("[Monitor] VCPU:%d, GVA:%lx, GPA:%llx, CR3: %lx, Flag: %s%s%s%s\n",
-			vcpu->vcpu_id, gva, gpa, vcpu->arch.mmu.get_cr3(vcpu),
-			error_code & PFERR_USER_MASK ? "R" : "_",
-			error_code & PFERR_WRITE_MASK ? "W" : "_",
-			error_code & PFERR_FETCH_MASK ? "X" : "_",
-			error_code * PFERR_PRESENT_MASK ? "P" : "_");
 
 	vcpu->arch.exit_qualification = exit_qualification;
 	return kvm_mmu_page_fault(vcpu, gpa, error_code, NULL, 0);
