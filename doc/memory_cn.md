@@ -607,87 +607,87 @@ map 成员是一个多级 (6 级) 页表，最后一级页表指向 MemoryRegion
 
 ### kvm_vm_ioctl_set_memory_region
 
-Add memory. Called when KVM receives an ioctl from KVM_SET_USER_MEMORY_REGION(KVM_SET_MEMORY_REGION has been replaced because fine-grained control is not supported).
+添加内存。在 KVM 收到 KVM_SET_USER_MEMORY_REGION(取代了 KVM_SET_MEMORY_REGION ，因为其不支持细粒度控制) 的 ioctl 时调用。
 
-Incoming parameters are as follows：
+传入参数如下：
 
 ```c
 struct kvm_userspace_memory_region {
-    __u32 slot;                                                             // id corresponding to kvm_memory_slot
+    __u32 slot;                                                             // 对应 kvm_memory_slot 的 id
     __u32 flags;
     __u64 guest_phys_addr;                                                  // GPA
-    __u64 memory_size; /* bytes */                                          // size
+    __u64 memory_size; /* bytes */                                          // 大小
     __u64 userspace_addr; /* start of the userspace allocated memory */     // HVA
 };
 ```
 
-flags Options：
+flags 可选：
 
-* Declares KVM_MEM_LOG_DIRTY_PAGES for write tracking to Region. Read them when KVM_GET_DIRTY_LOG is provided.
-* If KVM_MEM_READONLY supports readonly(KVM_CAP_READONLY_MEM), VMEXIT(KVM_EXIT_MMIO) is triggered when this Region is written.
+* KVM_MEM_LOG_DIRTY_PAGES 声明需要跟踪对该 Region 的写，提供给 KVM_GET_DIRTY_LOG 时读取
+* KVM_MEM_READONLY        如果支持 readonly(KVM_CAP_READONLY_MEM)，则当写该 Region 时触发 VMEXIT (KVM_EXIT_MMIO)
 
-kvm_vm_ioctl_set_memory_region => kvm_set_memory_region => __kvm_set_memory_region
+于是 kvm_vm_ioctl_set_memory_region => kvm_set_memory_region => __kvm_set_memory_region
 
-This function determines user actions based on npages(included in the region) and the original npages：
+该函数将根据 npages(region 所包含的数树) 和原来的 npages 判断用户操作：
 
 #### KVM_MR_CREATE
-If you have a page now and you don't have one, create and initialize a slot to add more memory space.
+现在有页而原来没有，则为新增内存区域，创建并初始化 slot 。
 
 #### KVM_MR_DELETE
-If there is no page now, mark the slot as KVM_MEMSLOT_INVALID to clear the memory area.
+现在没有页而原来有，则为删除内存区域，将 slot 标记为 KVM_MEMSLOT_INVALID
 
 #### KVM_MR_FLAGS_ONLY / KVM_MR_MOVE
-If you have a page now and you have one, you can modify the memory area, if only the flag changes, KVM_MR_FLAGS_ONLY, and if it is currently possible only KVM_MEM_LOG_DIRTY_PAGES, select whether to create or release the dirty_bitmap according to the flag.
+现在有页且原来也有，则为修改内存区域，如果只有 flag 变了，则为 KVM_MR_FLAGS_ONLY ，目前只有可能是 KVM_MEM_LOG_DIRTY_PAGES ，则根据 flag 选择是要创建还是释放 dirty_bitmap。
 
-If GPA changes, KVM_MR_MOVE must be moved. In fact, the original slot is marked as KVM_MEMSLOT_INVALID and a new one is added.
+如果 GPA 有变，则为 KVM_MR_MOVE ，需要进行移动。其实就直接将原来的 slot 标记为 KVM_MEMSLOT_INVALID，然后添加新的。
 
-The new/modified slots are updated with install_new_memslots.
+新增 / 修改后的 slot 通过 install_new_memslots 更新。
 
 #### kvm_memory_slot
 
-The slot for the __kvm_set_memory_region operation is the default uint of memory management in the KVM and is defined as follows：
+在 __kvm_set_memory_region 操作的 slot 是 KVM 中内存管理中的基本单位，定义如下：
 
 ```c
 struct kvm_memory_slot {
-    gfn_t base_gfn;                     // start gfn for slot
-    unsigned long npages;               // page number
-    unsigned long *dirty_bitmap;        // dirty page bitmap
-    struct kvm_arch_memory_slot arch;   // configuration correlation, including rmap and lpage_info, etc.
-    unsigned long userspace_addr;       // Corresponding starting HVA
+    gfn_t base_gfn;                     // slot 的起始 gfn
+    unsigned long npages;               // page 数
+    unsigned long *dirty_bitmap;        // 脏页 bitmap
+    struct kvm_arch_memory_slot arch;   // 结构相关，包括 rmap 和 lpage_info 等
+    unsigned long userspace_addr;       // 对应的起始 HVA
     u32 flags;
     short id;
 };
 
 
-struct kvm_arch_memory_slot {struct kvm_rmap_head *rmap[KVM_NR_PAGE_SIZES];              // reverse link
-    struct kvm_lpage_info *lpage_info[KVM_NR_PAGE_SIZES - 1];   // maintaining whether the next levvel of page table is turned off hugepage
+struct kvm_arch_memory_slot {struct kvm_rmap_head *rmap[KVM_NR_PAGE_SIZES];              // 反向链接
+    struct kvm_lpage_info *lpage_info[KVM_NR_PAGE_SIZES - 1];   // 维护下一级页表是否关闭 hugepage
     unsigned short *gfn_track[KVM_PAGE_TRACK_MAX];
 };
 ```
 
-slot is sotred in kvm->memslots[as_id]->memslots[id]->memslots[id] where as_is is address space id. In fact, the typical architecture always has only one address space, as_id always takes 0. Only x86 requires two address space, as_id = 0 is normal address space, and as_id = 1 is the SRAM space dedicated to SMM mode, and id is the slot id. Memory for all of these configurations is allocated to kvm_create_vm. It is initialized here.
+slot 保存在 kvm->memslots[as_id]->memslots[id] 中，其中 as_id 为 address space id，其实通常的架构都只有一个地址空间，as_id 总是取 0，唯独x86需要两个地址空间，as_id = 0为普通的地址空间，as_id = 1为SMM模式专用的SRAM空间，id 为 slot id 。这些结构的内存都在 kvm_create_vm 中就分配好了。这里对其进行初始化。
 
 
-### Memory Management Unit (MMU)
+### 内存管理单元 (MMU)
 
-#### Initialization
+#### 初始化
 
 ```
-kvm_init => kvm_arch_init => kvm_mmu_module_init => configure mmu_page_header_cache as cache
-                                                 => register_shrinker(&mmu_shrinker)                registration recovery function
+kvm_init => kvm_arch_init => kvm_mmu_module_init => 建立 mmu_page_header_cache 作为 cache
+                                                 => register_shrinker(&mmu_shrinker)                注册回收函数
 
 
 kvm_vm_ioctl_create_vcpu =>
-kvm_arch_vcpu_create => kvm_x86_ops->vcpu_create (vmx_create_vcpu) => init_rmode_identity_map       Configuring a 1024-page equivalent map for real mode
+kvm_arch_vcpu_create => kvm_x86_ops->vcpu_create (vmx_create_vcpu) => init_rmode_identity_map       为实模式建立 1024 个页的等值映射
                                                                    => kvm_vcpu_init => kvm_arch_vcpu_init => kvm_mmu_create
-kvm_arch_vcpu_setup => kvm_mmu_setup => init_kvm_mmu => init_kvm_tdp_mmu                            set properties and functions in vcpu->arch.mmu if two dimensional paging(EPT) is supported and initialized
-                                                     => init_kvm_softmmu => kvm_init_shadow_mmu     Otherwise, initialize the SPT
+kvm_arch_vcpu_setup => kvm_mmu_setup => init_kvm_mmu => init_kvm_tdp_mmu                            如果支持 two dimentional paging(EPT)，初始化之，设置 vcpu->arch.mmu 中的属性和函数
+                                                     => init_kvm_softmmu => kvm_init_shadow_mmu     否则初始化 SPT
 ```
 
 
 ##### kvm_mmu_create
 
-Initializes mmu-related information on a per-vcpu basis. Their definitions in vcpu include the following：
+以 vcpu 为单位初始化 mmu 相关信息。它们在 vcpu 中的相关定义包含：
 
 ```c
 struct kvm_vcpu_arch {
@@ -717,35 +717,35 @@ struct kvm_vcpu_arch {
      */
     struct kvm_mmu *walk_mmu;
 
-    // The following is used to speed up deployment of commonly used data structures
-    // Used to allocate pte_list_desc, which is a chain table entry in reverse map chain table parent_ptes, from mmu_set_spte => rmap_add => pte_list_add
+    // 以下为 cache，用于提升常用数据结构的分配速度
+    // 用于分配 pte_list_desc ，它是反向映射链表 parent_ptes 的链表项，在 mmu_set_spte => rmap_add => pte_list_add 中分配
     struct kvm_mmu_memory_cache mmu_pte_list_desc_cache;
-    // Used to allocate pages as kvm_mmu_page.spt
+    // 用于分配 page ，作为 kvm_mmu_page.spt
     struct kvm_mmu_memory_cache mmu_page_cache;
-    // Used to allocate kvm_mmu_page as a table of pages
+    // 用于分配 kvm_mmu_page ，作为页表页
     struct kvm_mmu_memory_cache mmu_page_header_cache;
     ...
 }
 ```
 
-Cache is used to speed up the allocation of commonly used data structures in page tables. These caches call mmu_topup_memory_caches when MMU(kvm_mmu_load) is initialized, page fault(tdp_page_fault) is generated, and so on to ensure that each cache is sufficient.
+其中 cache 用于提升页表中常用数据结构的分配速度。这些 cache 会在初始化 MMU(kvm_mmu_load)、发生 page fault(tdp_page_fault) 等情况下调用 mmu_topup_memory_caches 来保证各 cache 充足。
 
 ```c
-// Ensure that each cache is sufficient
+// 保证各 cache 充足
 static int mmu_topup_memory_caches(struct kvm_vcpu *vcpu)
 {
-    // r not zero means allocation from slab /__get_free_page failed, direct return error
+    // r 不为 0 表示从 slab 分配 /__get_free_page 失败，直接返回错误
     int r;
-    // if vcpu->arch.mmu_pte_list_desc_cache is insufficient, allocate from pte_list_desc_cache
+    // 如果 vcpu->arch.mmu_pte_list_desc_cache 不足，从 pte_list_desc_cache 中分配
     r = mmu_topup_memory_cache(&vcpu->arch.mmu_pte_list_desc_cache,
                    pte_list_desc_cache, 8 + PTE_PREFETCH_NUM);
     if (r)
         goto out;
-    // if vcpu->arch.mmu_page_cache is insufficient, deploy directly through __get_free_page
+    // 如果 vcpu->arch.mmu_page_cache 不足，直接通过 __get_free_page 分配
     r = mmu_topup_memory_cache_page(&vcpu->arch.mmu_page_cache, 8);
     if (r)
         goto out;
-    // Deploy from mmu_page_header_cache if vcpu->arch.mmu_page_header_cache is insufficient
+    // 如果 vcpu->arch.mmu_page_header_cache 不足，从 mmu_page_header_cache 中分配
     r = mmu_topup_memory_cache(&vcpu->arch.mmu_page_header_cache,
                    mmu_page_header_cache, 4);
 out:
@@ -753,9 +753,9 @@ out:
 }
 ```
 
-Two global slabs, pte_list_desc_cache and mmu_page_header_cache, are created in kvm_mmu_module_init as cache source for vcpu->arch.mmu_pte_list_desc_cache and vcpu->arch.mmu_page_header_cache.
+pte_list_desc_cache 和 mmu_page_header_cache 两块全局 slab cache 在 kvm_mmu_module_init 中被创建，作为 vcpu->arch.mmu_pte_list_desc_cache 和 vcpu->arch.mmu_page_header_cache 的 cache 来源。
 
-Allocated slabs can be found at host via `cat /proc/slabinfo`：
+可以在 host 通过 `cat /proc/slabinfo` 查看到分配的 slab：
 
 ```
 # name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab> : tunables <limit> <batchcount> <sharedfactor> : slabdata <active_slabs> <num_slabs> <sharedavail>
@@ -764,15 +764,15 @@ kvm_mmu_page_header    576    576    168   48    2 : tunables    0    0    0 : s
 
 
 
-#### Load Page Table
+#### 加载页表
 
-vm_vm_ioctl_create_vcpu is only initialized for mmu, such as setting vcpu->arch.mmu.root_hpa to INVALID_PAGE and setting this value to VM(VMLAUNCH/VMRESUME).
+kvm_vm_ioctl_create_vcpu 仅仅是对 mmu 进行初始化，比如将 vcpu->arch.mmu.root_hpa 设置为 INVALID_PAGE ，直到要进入 VM(VMLAUNCH/VMRESUME) 前才真正设置该值。
 
 ```
-vcpu_enter_guest => kvm_mmu_reload => kvm_mmu_load => mmu_topup_memory_caches                       ensure that each cache is sufficient
-                                                   => mmu_alloc_roots => mmu_alloc_direct_roots     allocate one kvm_mmu_page if the root page table does not exist
-                                                   => vcpu->arch.mmu.set_cr3 (vmx_set_cr3)          for EPT, load the HPA of spt(struct page) on this page to VMCS.
-                                                                                                    for SPT, load the HPA of spt(struct page) on this page into cr3
+vcpu_enter_guest => kvm_mmu_reload => kvm_mmu_load => mmu_topup_memory_caches                       保证各 cache 充足
+                                                   => mmu_alloc_roots => mmu_alloc_direct_roots     如果根页表不存在，则分配一个 kvm_mmu_page
+                                                   => vcpu->arch.mmu.set_cr3 (vmx_set_cr3)          对于 EPT，将该页的 spt(strcut page) 的 HPA 加载到 VMCS
+                                                                                                    对于 SPT，将该页的 spt(strcut page) 的 HPA 加载到 cr3
                  => kvm_x86_ops->run (vmx_vcpu_run)
                  => kvm_x86_ops->handle_exit (vmx_handle_exit)
 ```
@@ -780,56 +780,56 @@ vcpu_enter_guest => kvm_mmu_reload => kvm_mmu_load => mmu_topup_memory_caches   
 
 #### kvm_mmu_page
 
-Table of pages, see Documentation/virtual/kvm/mmu.txt for more information.
+页表页，详细解释见 Documentation/virtual/kvm/mmu.txt
 
 ```c
 struct kvm_mmu_page {
-    struct list_head link;                          // add kvm->arch.active_mmu_pages or invalid_list to indicate the status of the current page
-    struct hlist_node hash_link;                    // add to vcpu->kvm->arch.mmu_page_hash to provide quick lookup
+    struct list_head link;                          // 加到 kvm->arch.active_mmu_pages 或 invalid_list ，表示当前页处于的状态
+    struct hlist_node hash_link;                    // 加到 vcpu->kvm->arch.mmu_page_hash ，提供快速查找
 
     /*
      * The following two entries are used to key the shadow page in the
      * hash table.
      */
-    gfn_t gfn;                                      // gfn corresponding to the starting address of the management address range
-    union kvm_mmu_page_role role;                   // Basic information, including hardware attributes and layers to which they belong
+    gfn_t gfn;                                      // 管理地址范围的起始地址对应的 gfn
+    union kvm_mmu_page_role role;                   // 基本信息，包括硬件特性和所属层级等
 
-    u64 *spt;                                       // The address that points to the structure page, which contains all page table entries (pte). At the same time, page->private points to this kvm_mmu_page
+    u64 *spt;                                       // 指向 struct page 的地址，其包含了所有页表项 (pte)。同时 page->private 会指向该 kvm_mmu_page
     /* hold the gfn of each spte inside spt */
-    gfn_t *gfns;                                    // gfn corresponding to all page table entries (pte)
-    bool unsync;                                    // Use to indicate whether the page table entry (pte) is synchronized with guest on the last level of the page table. (guest whether tlb has been updated)
-    int root_count;          /* Currently serving as active root */ // Use for top-level page tables and statistics on how many EPTPs are directed to themselves
-    unsigned int unsync_children;                   // pte of unsync on page table
-    struct kvm_rmap_head parent_ptes; /* rmap pointers to parent sptes */ // reverse mapping (rmap), maintaining table entries pointing to one's parent
+    gfn_t *gfns;                                    // 所有页表项 (pte) 对应的 gfn
+    bool unsync;                                    // 用于最后一级页表页，表示该页的页表项 (pte) 是否与 guest 同步 (guest 是否已更新 tlb)
+    int root_count;          /* Currently serving as active root */ // 用于最高级页表页，统计有多少 EPTP 指向自身
+    unsigned int unsync_children;                   // 页表页中 unsync 的 pte 数
+    struct kvm_rmap_head parent_ptes; /* rmap pointers to parent sptes */ // 反向映射 (rmap)，维护指向自己的上级页表项
 
     /* The page is obsolete if mmu_valid_gen != kvm->arch.mmu_valid_gen.  */
-    unsigned long mmu_valid_gen;                    // Algebraically, less than kvm->arch.mmu_valid_gen indicates that it is invalid
+    unsigned long mmu_valid_gen;                    // 代数，如果比 kvm->arch.mmu_valid_gen 小则表示已失效
 
-    DECLARE_BITMAP(unsync_child_bitmap, 512);       // Unsync's spte bitmap on the page table.
+    DECLARE_BITMAP(unsync_child_bitmap, 512);       // 页表页中 unsync 的 spte bitmap
 
 #ifdef CONFIG_X86_32
     /*
      * Used out of the mmu-lock to avoid reading spte values while an
      * update is in progress; see the comments in __get_spte_lockless().
      */
-    int clear_spte_count;                           // At 32bit, the modification of the spte is atommic, so this count detects if it is being modified and requires redo if it is modified
+    int clear_spte_count;                           // 32bit 下，对 spte 的修改是原子的，因此通过该计数来检测是否正在被修改，如果被改了需要 redo
 #endif
 
     /* Number of writes since the last time traversal visited this page.  */
-    atomic_t write_flooding_count;                  // Statistics the number of emulations since the last use and drops this page to unmap if it exceeds a certain number
+    atomic_t write_flooding_count;                  // 统计从上次使用以来的 emulation 次数，如果超过一定次数，会把该 page 给 unmap 掉
 };
 
 union kvm_mmu_page_role {
     unsigned word;
     struct {
-        unsigned level:4;           // The hierarchy in which the page is located
-        unsigned cr4_pae:1;         // cr4.pae, 1 denotes the use of 64bit gpte
-        unsigned quadrant:2;        // if cr4.pae=0, the gpte is 32bit, but the spte is 64bit, so you need to use multiple sptees to represent a gpte. This field indicates the number of blocks in the gpte
+        unsigned level:4;           // 页所处的层级
+        unsigned cr4_pae:1;         // cr4.pae，1 表示使用 64bit gpte
+        unsigned quadrant:2;        // 如果 cr4.pae=0，则 gpte 为 32bit，但 spte 为 64bit，因此需要用多个 spte 来表示一个 gpte，该字段指示是 gpte 的第几块
         unsigned direct:1;
-        unsigned access:3;          // Access rights
-        unsigned invalid:1;         // It doesn't work. Once the unpin is destroyed, it won't work.
+        unsigned access:3;          // 访问权限
+        unsigned invalid:1;         // 失效，一旦 unpin 就会被销毁
         unsigned nxe:1;             // efer.nxe
-        unsigned cr0_wp:1;          // cr0.wp, write protection
+        unsigned cr0_wp:1;          // cr0.wp，写保护
         unsigned smep_andnot_wp:1;  // cr4.smep && !cr0.wp
         unsigned smap_andnot_wp:1;  // cr4.smap && !cr0.wp
         unsigned :8;
@@ -840,7 +840,7 @@ union kvm_mmu_page_role {
          * simple shift.  While there is room, give it a whole
          * byte so it is also faster to load it from memory.
          */
-        unsigned smm:8;             // In system management mode
+        unsigned smm:8;             // 处于 system management mode
     };
 };
 ```
