@@ -8,7 +8,7 @@
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
 #include <linux/dynamic_debug.h>
-#include <linux/jiffies.h>
+#include <linux/sched/clock.h>
 #include <linux/seq_file.h>
 #include <linux/fs.h>
 #include <asm/atomic.h>
@@ -394,17 +394,20 @@ int test_thread(void *data)
 	int i;
 	struct lb_info * lb_data = (struct lb_info *)data;
 	int cpu = get_cpu();
-	u64 prev, cur;
+	unsigned long prev, cur;
 
-	prev = get_jiffies_64();
+	prev = sched_clock();
 	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
 		if (unlikely(lb_data->monitor && i && ((i % 1000)==0))) {
-			cur = get_jiffies_64();
-			printk("lockbench: monitor thread %dth [%lld]\n", i, cur-prev);
+			cur = sched_clock();
+			printk("lockbench: monitor thread %dth [%lu]\n", i, cur-prev);
 			prev = cur;
 		}
 		execute_cs(lb_data->req, lb_data->params, lb_data->lock);
 	}
+
+	cur = sched_clock();
+	printk("lockbench: monitor thread %dth [%lu]\n", i, cur-prev);
 
 	per_cpu(task_array, cpu) = NULL;
 	put_cpu();
