@@ -152,7 +152,7 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 		pending = GET_NEXT_NODE(node_array, pending_cpu);
 		pending_cpu = READ_ONCE(pending->next);
 		/* Keep ordering next -> (req, params)*/
-		smp_rmb();
+		smp_mb();
 
 		/* Branch prediction: which case is more profitable? */
 		if (DECODE_CPU(pending_cpu) == NR_CPUS)
