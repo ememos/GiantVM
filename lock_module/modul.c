@@ -240,6 +240,7 @@ static ssize_t lb_quit(struct file *filp, const char __user *ubuf,
 		return ret;
 
 	if (val == 1) {
+		dummy_lock.counter = ENCODE_NEXT(0, 0);
 		for_each_online_cpu(cpu) {
 			ld = &per_cpu(lb_info_array, cpu);
 			ld->quit = true;
@@ -251,6 +252,7 @@ static ssize_t lb_quit(struct file *filp, const char __user *ubuf,
 			node[1].wait = false;
 			node[1].completed = true;
 		}
+		per_cpu(node_array, 0)[0].completed = false;
 	}
 	(*ppos)++;
 	return cnt;
@@ -430,6 +432,7 @@ int prepare_tests(void)
 			return 1;
 		}
 	}
+
 	for_each_online_cpu(cpu) {
 		if (nr_cpus++ >= max_cpus)
 			break;
