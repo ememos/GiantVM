@@ -19,6 +19,8 @@ MODULE_DESCRIPTION("Simple Lock benchmark module");
 MODULE_AUTHOR("Wonhyuk Yang");
 MODULE_LICENSE("GPL");
 
+#define NR_BENCH (500000)
+
 #define MAX_COMBINER_OPERATIONS 5
 
 /* CPU number and index are encoded in cc_node.next
@@ -36,7 +38,11 @@ MODULE_LICENSE("GPL");
 #define GET_NEXT_NODE(x, y)	(per_cpu(x, DECODE_CPU(y)) + DECODE_IDX(y))
 
 typedef void* (*request_t)(void *);
-int prepare_tests(void);
+typedef int (*test_thread_t)(void *);
+
+int prepare_tests(test_thread_t, void *, const char *);
+int test_thread(void *data);
+int test_thread2(void *data);
 
 struct cc_node {
 	request_t req;
@@ -75,7 +81,7 @@ DEFINE_PER_CPU(struct cc_node, node_array[2]) = {
 struct lb_info {
 	request_t req;
 	void *params;
-	atomic_t *lock;
+	void *lock;
 	int counter;
 	bool monitor;
 	bool quit;
@@ -184,6 +190,7 @@ out:
 }
 
 /* Dummy workload */
+DEFINE_SPINLOCK(dummy_spinlock);
 atomic_t dummy_lock = ATOMIC_INIT(0);
 int dummy_counter = 0;
 void* dummy_increment(void* params)
@@ -215,14 +222,39 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 {
 	unsigned long val;
 	int ret;
+	int cpu;
+	struct lb_info *li;
+	bool monitor_thread = true;
+
 	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
 
 	if (ret)
 		return ret;
 
 	if (val == 1) {
-		prepare_tests();
+		for_each_online_cpu(cpu) {
+			li = &per_cpu(lb_info_array, cpu);
+			li->req = dummy_increment;
+			li->params = &dummy_counter;
+			li->lock = (void *)&dummy_lock;
+			li->counter = NR_BENCH;
+			li->monitor = monitor_thread;
+			monitor_thread = false;
+		}
+		prepare_tests(test_thread, (void *)&lb_info_array, "cc-lockbench");
+	} else if (val == 2) {
+		for_each_online_cpu(cpu) {
+			li = &per_cpu(lb_info_array, cpu);
+			li->req = dummy_increment;
+			li->params = &dummy_counter;
+			li->lock = (void *)&dummy_spinlock;
+			li->counter = NR_BENCH;
+			li->monitor = monitor_thread;
+			monitor_thread = false;
+		}
+		prepare_tests(test_thread2, (void *)&lb_info_array, "spinlockbench");
 	}
+
 	(*ppos)++;
 	return cnt;
 }
@@ -289,13 +321,13 @@ static int t_show(struct seq_file *m, void *v)
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
-						"\trefcount = %lld,\n"
+						"\trefcount = %d,\n"
 						"\tNext (%d, %d)\n"
 						"\tPrev (%d, %d)\n}\n",
 						cpu, 0,
 						node[0].req, node[0].params,
 						node[0].wait, node[0].completed,
-						node[0].refcount,
+						node[0].refcount.counter,
 						DECODE_CPU(node[0].next),
 						DECODE_IDX(node[0].next),
 						DECODE_CPU(node[0].prev),
@@ -304,13 +336,13 @@ static int t_show(struct seq_file *m, void *v)
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
-						"\trefcount = %lld,\n"
+						"\trefcount = %d,\n"
 						"\tNext (%d, %d)\n"
 						"\tPrev (%d, %d)\n}\n",
 						cpu, 1,
 						node[1].req, node[1].params,
 						node[1].wait, node[1].completed,
-						node[1].refcount,
+						node[1].refcount.counter,
 						DECODE_CPU(node[1].next),
 						DECODE_IDX(node[1].next),
 						DECODE_CPU(node[1].prev),
@@ -394,33 +426,65 @@ static int lb_debugfs_exit(void)
 int test_thread(void *data)
 {
 	int i;
-	struct lb_info * lb_data = (struct lb_info *)data;
 	int cpu = get_cpu();
+	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
 	unsigned long prev, cur;
 
-	prev = sched_clock();
+	if (unlikely(lb_data->monitor))
+		prev = sched_clock();
 	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
 		if (unlikely(lb_data->monitor && i && ((i % 1000)==0))) {
 			cur = sched_clock();
-			printk("lockbench: monitor thread %dth [%lu]\n", i, cur-prev);
+			printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, cur-prev);
 			prev = cur;
 		}
 		execute_cs(lb_data->req, lb_data->params, lb_data->lock);
 	}
 
-	cur = sched_clock();
-	printk("lockbench: monitor thread %dth [%lu]\n", i, cur-prev);
+	if (unlikely(lb_data->monitor)) {
+		cur = sched_clock();
+		printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, cur-prev);
+	}
 
 	per_cpu(task_array, cpu) = NULL;
 	put_cpu();
 	return 0;
 }
 
-int prepare_tests(void)
+int test_thread2(void *data)
+{
+	int i;
+	int cpu = get_cpu();
+	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
+	unsigned long prev = 0, cur = 0;
+	spinlock_t *lock = (spinlock_t *)lb_data->lock;
+
+	if (unlikely(lb_data->monitor))
+		prev = sched_clock();
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
+		if (unlikely(lb_data->monitor && i && ((i % 1000)==0))) {
+			cur = sched_clock();
+			printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, cur-prev);
+			prev = cur;
+		}
+		spin_lock(lock);
+		lb_data->req(lb_data->params);
+		spin_unlock(lock);
+	}
+
+	if (unlikely(lb_data->monitor)) {
+		cur = sched_clock();
+		printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, cur-prev);
+	}
+
+	per_cpu(task_array, cpu) = NULL;
+	put_cpu();
+	return 0;
+}
+
+int prepare_tests(test_thread_t test, void *arg, const char *name)
 {
 	struct task_struct *thread;
-	struct lb_info *li;
-	bool monitor_thread = true;
 	int cpu;
 	int max_cpus = 3;
 	int nr_cpus = 0;
@@ -437,14 +501,7 @@ int prepare_tests(void)
 		if (nr_cpus++ >= max_cpus)
 			break;
 
-		li = &per_cpu(lb_info_array, cpu);
-		li->req = dummy_increment;
-		li->params = &dummy_counter;
-		li->lock = &dummy_lock;
-		li->counter = 1000 * 10;
-		li->monitor = monitor_thread;
-
-		thread = kthread_create(test_thread, (void *)li, "lockbench/%u", cpu);
+		thread = kthread_create(test, arg, "%s/%u", name, cpu);
 		if (IS_ERR(thread)) {
 			pr_err("Failed to create kthread on CPU %u\n", cpu);
 			continue;
@@ -453,8 +510,6 @@ int prepare_tests(void)
 
 		wake_up_process(thread);
 		per_cpu(task_array, cpu) = thread;
-
-		monitor_thread = false;
 	}
 	return 0;
 }
