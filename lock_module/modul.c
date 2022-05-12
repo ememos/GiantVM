@@ -1,6 +1,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/percpu.h>
@@ -23,6 +24,13 @@ MODULE_LICENSE("GPL");
 #define NR_BENCH (500000)
 
 #define MAX_COMBINER_OPERATIONS 5
+
+#define MAX_CPU		16
+#define MAX_DELAY 	100
+
+static int max_cpus = 11;
+static int delay_time = 0;
+static int nr_bench = 100000;
 
 /* CPU number and index are encoded in cc_node.next
  * Now, each cpu has two node and these nodes are
@@ -211,14 +219,23 @@ out:
 DEFINE_SPINLOCK(dummy_spinlock);
 atomic_t dummy_lock = ATOMIC_INIT(0);
 int dummy_counter = 0;
+int cache_table[128];
 void* dummy_increment(void* params)
 {
+	int i;
 	int *counter = (int*)params;
 	if (unlikely(counter == NULL)) {
 		printk("!!!! counter: %p", (counter));
 	} else {
 		(*counter)++;
 	}
+
+	for (i = 0; i < 128; i++)
+		cache_table[i]++;
+
+	if (delay_time)
+		udelay(delay_time);
+
 	return params;
 }
 
@@ -255,7 +272,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->req = dummy_increment;
 			li->params = &dummy_counter;
 			li->lock = (void *)&dummy_lock;
-			li->counter = NR_BENCH;
+			li->counter = nr_bench;
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
@@ -266,7 +283,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->req = dummy_increment;
 			li->params = &dummy_counter;
 			li->lock = (void *)&dummy_spinlock;
-			li->counter = NR_BENCH;
+			li->counter = nr_bench;
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
@@ -304,6 +321,57 @@ static ssize_t lb_quit(struct file *filp, const char __user *ubuf,
 		}
 		per_cpu(node_array, 0)[0].completed = false;
 	}
+	(*ppos)++;
+	return cnt;
+}
+
+static ssize_t lb_cpu(struct file *filp, const char __user *ubuf,
+				size_t cnt, loff_t *ppos)
+{
+	int ret;
+	unsigned long val;
+
+	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
+
+	if (ret)
+		return ret;
+
+	if (val > 0 && val < 15)
+		max_cpus = val;
+
+	(*ppos)++;
+	return cnt;
+}
+
+static ssize_t lb_bench(struct file *filp, const char __user *ubuf,
+				size_t cnt, loff_t *ppos)
+{
+	int ret;
+	unsigned long val;
+
+	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
+
+	if (ret)
+		return ret;
+
+	if (val > 0 && val < NR_BENCH)
+		nr_bench = val;
+
+	(*ppos)++;
+	return cnt;
+}
+
+static ssize_t lb_delay(struct file *filp, const char __user *ubuf,
+				size_t cnt, loff_t *ppos)
+{
+	int ret;
+	unsigned long val;
+	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
+
+	if (ret)
+		return ret;
+	if (val >= 0 && val <= MAX_DELAY)
+		delay_time = val;
 	(*ppos)++;
 	return cnt;
 }
@@ -426,10 +494,26 @@ static const struct file_operations lb_trigger_fops = {
 
 static const struct file_operations lb_quit_fops = {
 	.open	 = lb_open,
-	.read	 = NULL,
 	.write   = lb_quit,
 	.release = lb_release,
-	.llseek  = NULL,
+};
+
+static const struct file_operations lb_cpu_fops = {
+	.open	 = lb_open,
+	.write   = lb_cpu,
+	.release = lb_release,
+};
+
+static const struct file_operations lb_bench_fops = {
+	.open	 = lb_open,
+	.write   = lb_bench,
+	.release = lb_release,
+};
+
+static const struct file_operations lb_delay_fops = {
+	.open	 = lb_open,
+	.write   = lb_delay,
+	.release = lb_release,
 };
 
 static const struct file_operations lb_status_fops= {
@@ -449,6 +533,12 @@ static int lb_debugfs_init(void)
 					lb_debugfs_root, NULL, &lb_trigger_fops);
 	debugfs_create_file("quit", 0200,
 					lb_debugfs_root, NULL, &lb_quit_fops);
+	debugfs_create_file("cpu", 0200,
+					lb_debugfs_root, NULL, &lb_cpu_fops);
+	debugfs_create_file("nr_bench", 0200,
+					lb_debugfs_root, NULL, &lb_bench_fops);
+	debugfs_create_file("delay", 0200,
+					lb_debugfs_root, NULL, &lb_delay_fops);
 	debugfs_create_file("status", 0400,
 					lb_debugfs_root, NULL, &lb_status_fops);
 
@@ -524,7 +614,6 @@ int prepare_tests(test_thread_t test, void *arg, const char *name)
 {
 	struct task_struct *thread;
 	int cpu;
-	int max_cpus = 12;
 	int nr_cpus = 0;
 
 	for_each_online_cpu(cpu) {
@@ -581,3 +670,4 @@ static void lock_benchmark_exit(void)
 
 module_init(lock_benchmark_init);
 module_exit(lock_benchmark_exit);
+
