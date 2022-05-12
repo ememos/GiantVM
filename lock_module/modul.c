@@ -19,6 +19,7 @@ MODULE_DESCRIPTION("Simple Lock benchmark module");
 MODULE_AUTHOR("Wonhyuk Yang");
 MODULE_LICENSE("GPL");
 
+//#define DEBUG
 #define NR_BENCH (500000)
 
 #define MAX_COMBINER_OPERATIONS 5
@@ -50,9 +51,11 @@ struct cc_node {
 	void* ret;
 	bool wait;
 	bool completed;
-	int prev;
 	int next;
+#ifdef DEBUG
+	int prev;
 	atomic_t refcount;
+#endif
 };
 
 DEFINE_PER_CPU(struct cc_node, node_array[2]) = {
@@ -62,9 +65,11 @@ DEFINE_PER_CPU(struct cc_node, node_array[2]) = {
 		.ret = NULL,
 		.wait = false,
 		.completed = false,
-		.prev = ENCODE_NEXT(NR_CPUS, 0),
 		.next = ENCODE_NEXT(NR_CPUS, 1),
+#ifdef DEBUG
+		.prev = ENCODE_NEXT(NR_CPUS, 0),
 		.refcount = ATOMIC_INIT(0),
+#endif
 	},
 	{
 		.req = NULL,
@@ -72,9 +77,11 @@ DEFINE_PER_CPU(struct cc_node, node_array[2]) = {
 		.ret = NULL,
 		.wait = false,
 		.completed = false,
-		.prev = ENCODE_NEXT(NR_CPUS, 1),
 		.next = ENCODE_NEXT(NR_CPUS, 0),
+#ifdef DEBUG
+		.prev = ENCODE_NEXT(NR_CPUS, 1),
 		.refcount = ATOMIC_INIT(0),
+#endif
 	},
 };
 
@@ -104,6 +111,7 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	unsigned int this_cpu = get_cpu();
 	unsigned int pending_cpu;
 	unsigned int prev_cpu;
+	request_t pending_req;
 
 	/* get/update node_arra_idx */
 	int this_cpu_idx = per_cpu(node_array_idx, this_cpu);
@@ -119,10 +127,14 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	next->next = ENCODE_NEXT(NR_CPUS, 0);
 	smp_wmb();
 
+#ifdef DEBUG
 	atomic_inc(&next->refcount);
+#endif
 	prev_cpu = atomic_xchg(lock, this_cpu);
 	WARN(prev_cpu == this_cpu, "lockbench: prev_cpu == this_cpu, Can't be happend!!!");
+#ifdef DEBUG
 	next->prev = prev_cpu;
+#endif
 
 	prev = GET_NEXT_NODE(node_array, prev_cpu);
 	/* request and parameter should be set. Then, next should be set */
@@ -144,7 +156,9 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 		cpu_relax();
 
 	if (READ_ONCE(prev->completed)) {
+#ifdef DEBUG
 		atomic_dec(&next->refcount);
+#endif
 		put_cpu();
 		pr_debug("lockbench: <Normal thread> CPU: (%d, %d) end of critical section!\n",
 						DECODE_CPU(this_cpu), DECODE_IDX(this_cpu));
@@ -158,7 +172,7 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 		pending = GET_NEXT_NODE(node_array, pending_cpu);
 		pending_cpu = READ_ONCE(pending->next);
 		/* Keep ordering next -> (req, params)*/
-		smp_mb();
+		smp_rmb();
 
 		/* Branch prediction: which case is more profitable? */
 		if (DECODE_CPU(pending_cpu) == NR_CPUS)
@@ -169,10 +183,12 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 						DECODE_CPU(pending->next), DECODE_IDX(pending->next),
 						pending->req);
 
+		pending_req = READ_ONCE(pending->req);
 		/* Preserve store order completed -> wait -> next */
-		WARN(pending->req == NULL, "lockbench: pending->req == NULL...");
-		pending->ret = pending->req(pending->params);
+		WARN(pending_req == NULL, "lockbench: pending->req == NULL...");
+		WRITE_ONCE(pending->ret, pending_req(pending->params));
 		WRITE_ONCE(pending->completed, true);
+		smp_wmb();
 		WRITE_ONCE(pending->wait, false);
 	}
 	/* Pass tho combiner thread role */
@@ -183,7 +199,9 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	pending = GET_NEXT_NODE(node_array, pending_cpu);
 out:
 	pending->wait = false;
+#ifdef DEBUG
 	atomic_dec(&next->refcount);
+#endif
 	put_cpu();
 	pr_debug("lockbench: <Combiner thread> end of critical section!\n");
 	return prev->ret;
@@ -321,32 +339,52 @@ static int t_show(struct seq_file *m, void *v)
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
+#ifdef DEBUG
 						"\trefcount = %d,\n"
 						"\tNext (%d, %d)\n"
 						"\tPrev (%d, %d)\n}\n",
+#else
+						"\tNext (%d, %d)\n",
+#endif
 						cpu, 0,
 						node[0].req, node[0].params,
 						node[0].wait, node[0].completed,
+#ifdef DEBUG
 						node[0].refcount.counter,
 						DECODE_CPU(node[0].next),
 						DECODE_IDX(node[0].next),
 						DECODE_CPU(node[0].prev),
-						DECODE_IDX(node[0].prev));
+						DECODE_IDX(node[0].prev)
+#else
+						DECODE_CPU(node[0].next),
+						DECODE_IDX(node[0].next)
+#endif
+						);
 		seq_printf(m, "Node(%d, %d) {\n"
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
+#ifdef DEBUG
 						"\trefcount = %d,\n"
 						"\tNext (%d, %d)\n"
 						"\tPrev (%d, %d)\n}\n",
+#else
+						"\tNext (%d, %d)\n",
+#endif
 						cpu, 1,
 						node[1].req, node[1].params,
 						node[1].wait, node[1].completed,
+#ifdef DEBUG
 						node[1].refcount.counter,
 						DECODE_CPU(node[1].next),
 						DECODE_IDX(node[1].next),
 						DECODE_CPU(node[1].prev),
-						DECODE_IDX(node[1].prev));
+						DECODE_IDX(node[1].prev)
+#else
+						DECODE_CPU(node[1].next),
+						DECODE_IDX(node[1].next)
+#endif
+						);
 	}
 
 	return 0;
@@ -428,7 +466,7 @@ int test_thread(void *data)
 	int i;
 	int cpu = get_cpu();
 	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
-	unsigned long prev, cur;
+	unsigned long prev = 0, cur;
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
@@ -486,7 +524,7 @@ int prepare_tests(test_thread_t test, void *arg, const char *name)
 {
 	struct task_struct *thread;
 	int cpu;
-	int max_cpus = 3;
+	int max_cpus = 12;
 	int nr_cpus = 0;
 
 	for_each_online_cpu(cpu) {
