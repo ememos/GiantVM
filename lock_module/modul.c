@@ -24,7 +24,8 @@ MODULE_LICENSE("GPL");
 
 //#define DEBUG
 //#define BLOCK_IRQ
-#define NR_BENCH (5000000)
+#define NR_BENCH	(5000000)
+#define NR_SAMPLE	1000
 
 #define MAX_COMBINER_OPERATIONS 1
 
@@ -35,6 +36,7 @@ static int max_cpus = 14;
 static int delay_time = 0;
 static int nr_bench = 500000;
 
+static unsigned long perf_result[NR_BENCH/NR_SAMPLE];
 /* CPU number and index are encoded in cc_node.next
  * Now, each cpu has two node and these nodes are
  * used alternatley. In this way, we can avoid
@@ -283,8 +285,8 @@ void* dummy_increment(void* params)
 	int i;
 	int *counter = (int*)params;
 	(*counter)++;
-
-	for (i = 0; i < 4; i++)
+	return NULL;
+	for (i = 0; i < 0; i++)
 		cache_table[i*1024]++;
 
 	if (delay_time)
@@ -342,7 +344,6 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 		}
 		prepare_tests(test_thread2, (void *)&lb_info_array, "spinlockbench");
 	}
-
 	(*ppos)++;
 	return cnt;
 }
@@ -613,10 +614,10 @@ int test_thread(void *data)
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
-	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
-		if (unlikely(lb_data->monitor && i && ((i % 1000)==0))) {
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit);i++) {
+		if (unlikely(lb_data->monitor && i && (i%1000==0))) {
 			cur = sched_clock();
-			printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, cur-prev);
+			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
 			prev = cur;
 		}
 #ifdef BLOCK_IRQ
@@ -630,7 +631,9 @@ int test_thread(void *data)
 
 	if (unlikely(lb_data->monitor)) {
 		cur = sched_clock();
-		printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, cur-prev);
+		perf_result[(i+NR_SAMPLE-1)/NR_SAMPLE-1] = cur-prev;
+		for (i=0;i<lb_data->counter;i+=NR_SAMPLE)
+			printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, perf_result[i/NR_SAMPLE]);
 	}
 
 	per_cpu(task_array, cpu) = NULL;
@@ -652,9 +655,9 @@ int test_thread2(void *data)
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
 	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
-		if (unlikely(lb_data->monitor && i && ((i % 1000)==0))) {
+		if (unlikely(lb_data->monitor && i && (i%1000==0))) {
 			cur = sched_clock();
-			printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, cur-prev);
+			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
 			prev = cur;
 		}
 #ifdef BLOCK_IRQ
@@ -672,7 +675,9 @@ int test_thread2(void *data)
 
 	if (unlikely(lb_data->monitor)) {
 		cur = sched_clock();
-		printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, cur-prev);
+		perf_result[(i+NR_SAMPLE-1)/NR_SAMPLE-1] = cur-prev;
+		for (i=0;i<lb_data->counter;i+=NR_SAMPLE)
+			printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, perf_result[i/NR_SAMPLE]);
 	}
 
 	per_cpu(task_array, cpu) = NULL;
