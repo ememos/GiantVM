@@ -34,7 +34,8 @@ MODULE_LICENSE("GPL");
 
 static int max_cpus = 14;
 static int delay_time = 0;
-static int nr_bench = 500000;
+static int nr_bench = 500000<<1;
+static int thread_switch = 0;
 
 static unsigned long perf_result[NR_BENCH/NR_SAMPLE];
 /* CPU number and index are encoded in cc_node.next
@@ -317,10 +318,10 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 	bool monitor_thread = true;
 
 	ret = kstrtoul_from_user(ubuf, cnt, 10, &val);
-
 	if (ret)
 		return ret;
 
+	WRITE_ONCE(thread_switch, 0);
 	if (val == 1) {
 		for_each_online_cpu(cpu) {
 			li = &per_cpu(lb_info_array, cpu);
@@ -345,6 +346,8 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 		prepare_tests(test_thread2, (void *)&lb_info_array, "spinlockbench");
 	}
 	(*ppos)++;
+	udelay(1000);
+	WRITE_ONCE(thread_switch, 1);
 	return cnt;
 }
 
@@ -609,8 +612,9 @@ int test_thread(void *data)
 #ifdef BLOCK_IRQ
 	unsigned long flags;
 #endif
-	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
+	struct lb_info *lb_data = &per_cpu(*((struct lb_info *)data), cpu);
 	unsigned long prev = 0, cur;
+	while(!READ_ONCE(thread_switch));
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
@@ -651,6 +655,7 @@ int test_thread2(void *data)
 	unsigned long flags;
 #endif
 	spinlock_t *lock = (spinlock_t *)lb_data->lock;
+	while(!READ_ONCE(thread_switch));
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
