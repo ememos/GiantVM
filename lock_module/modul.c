@@ -464,6 +464,48 @@ static int lb_status_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
+static int r_show(struct seq_file *m, void *v)
+{
+	int cpu;
+	struct task_struct *thread;
+
+	for_each_online_cpu(cpu) {
+		thread = per_cpu(task_array, cpu);
+		if (thread) {
+			seq_printf(m, "0");
+			return 0;
+		}
+	}
+	seq_printf(m, "1");
+	return 0;
+}
+
+static const struct seq_operations show_ready_seq_ops= {
+	.start		= t_start,
+	.next		= t_next,
+	.stop		= t_stop,
+	.show		= r_show,
+};
+
+static int lb_ready_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *m;
+	int ret;
+
+	ret = seq_open(file, &show_ready_seq_ops);
+	if (ret) {
+		return ret;
+	}
+
+	m = file->private_data;
+	return 0;
+}
+
+static int lb_ready_release(struct inode *inode, struct file *file)
+{
+	return seq_release(inode, file);
+}
+
 static const struct file_operations lb_trigger_fops = {
 	.open	 = lb_open,
 	.read	 = NULL,
@@ -503,6 +545,13 @@ static const struct file_operations lb_status_fops= {
 	.release = lb_status_release,
 };
 
+static const struct file_operations lb_ready_fops= {
+	.open	 = lb_ready_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = lb_ready_release,
+};
+
 static struct dentry *lb_debugfs_root;
 
 static int lb_debugfs_init(void)
@@ -521,6 +570,9 @@ static int lb_debugfs_init(void)
 					lb_debugfs_root, NULL, &lb_delay_fops);
 	debugfs_create_file("status", 0400,
 					lb_debugfs_root, NULL, &lb_status_fops);
+	debugfs_create_file("ready", 0400,
+					lb_debugfs_root, NULL, &lb_ready_fops);
+
 
 	return 0;
 }
