@@ -6,7 +6,7 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
-clk = 1 / (psutil.cpu_freq().min / (1000*1000))
+clk = 1 / (psutil.cpu_freq().current / (1000*1000))
 print(clk)
 cc_lock = {"name":"cc_lock  ", "nr":0, "time":list(), "color":"r"}
 spin_lock = {"name":"spin_lock", "nr":0, "time":list(), "color":"b"}
@@ -16,8 +16,9 @@ def print_stat(target):
     var = sum([(avg-i)**2 for i in target["time"]]) / len(target["time"])
     d = np.array(target["time"])
     plt.hist(d, bins=200, alpha=0.7, histtype='step', color=target["color"], label=target["name"])
-    print("[{0}] average clock: {1:15.5f} std: {2:15.5f}, nr: {3}".format(target["name"],
-            avg, math.sqrt(var), target["nr"]))
+    #print("[{0}] average clock: {1:15.5f} std: {2:15.5f}, nr: {3}".format(target["name"],
+    #        avg, math.sqrt(var), target["nr"]))
+    print(avg, math.sqrt(var),)
     return avg
 
 if __name__ == "__main__":
