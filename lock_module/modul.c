@@ -24,6 +24,7 @@ MODULE_LICENSE("GPL");
 
 //#define DEBUG
 //#define BLOCK_IRQ
+#define DYNAMIC_PERCPU
 #define NR_BENCH	(5000000)
 #define NR_SAMPLE	1000
 
@@ -43,7 +44,7 @@ static unsigned long perf_result[NR_BENCH/NR_SAMPLE];
  * used alternatley. In this way, we can avoid
  * node overwrite problem.
  */
-#define INDEX_SHIFT			(2)
+#define INDEX_SHIFT			(1)
 #define INDEX_SIZE			(1<<INDEX_SHIFT)
 #define INDEX_MASK			(INDEX_SIZE - 1)
 #define ENCODE_NEXT(x, y)	((x << INDEX_SHIFT) | (y & INDEX_MASK))
@@ -51,14 +52,19 @@ static unsigned long perf_result[NR_BENCH/NR_SAMPLE];
 #define DECODE_IDX(x)		(x & INDEX_MASK)
 #define DECODE_CPU(x)		(x >> INDEX_SHIFT)
 
-#define GET_NEXT_NODE(x, y)	(per_cpu(x, DECODE_CPU(y)) + DECODE_IDX(y))
+#define GET_NEXT_NODE(x, y)	(per_cpu_ptr(x, DECODE_CPU(y)) + DECODE_IDX(y))
 
 #define GVM_CACHE_BYTES		(1<<12)
 #define arch_lock_xchg(ptr, v)	__xchg_op((ptr), (v), xchg, "lock; ")
 
 static inline int atomic_lock_xchg(atomic_t *v, int new)
 {
-	return arch_lock_xchg(&v->counter, new);
+	int val;
+	do {
+		val = v->counter;
+	} while (atomic_cmpxchg(v, val, new) != val);
+	return val;
+	//return arch_lock_xchg(&v->counter, new);
 }
 typedef void* (*request_t)(void *);
 typedef int (*test_thread_t)(void *);
@@ -72,30 +78,18 @@ int test_thread2(void *data);
 
 struct cc_node {
 	struct cc_node *next;
+	int idx;
 	request_t req;
 	void* params;
-	atomic_t refcount __attribute__((aligned(L1_CACHE_BYTES)));
+	atomic_t refcount;
 	int status;
 	void* ret;
-};
+}__attribute__((aligned(GVM_CACHE_BYTES)));
 
 #ifdef DYNAMIC_PERCPU
-struct cc_node __percpu *node_array;
+struct cc_node __percpu *node_array __attribute__((aligned(GVM_CACHE_BYTES)));
 #else
-DEFINE_PER_CPU(struct cc_node, node_array[INDEX_SIZE]) = {
-	{
-		.refcount = ATOMIC_INIT(0),
-	},
-	{
-		.refcount = ATOMIC_INIT(0),
-	},
-	{
-		.refcount = ATOMIC_INIT(0),
-	},
-	{
-		.refcount = ATOMIC_INIT(0),
-	}
-};
+DEFINE_PER_CPU(struct cc_node, node_array[INDEX_SIZE]);
 #endif
 
 struct lb_info {
@@ -109,12 +103,6 @@ struct lb_info {
 
 DEFINE_PER_CPU(struct lb_info, lb_info_array);
 DEFINE_PER_CPU(struct task_struct *, task_array);
-
-/* At first, lock is NULL value. This mean pointing the
- * CPU 0, idx 0. Thus, To make it consistent node_array_idx
- * should be set 1
- */
-DEFINE_PER_CPU(int, node_array_idx) = 1;
 
 static inline bool is_tail(struct cc_node *node, atomic_t *lock)
 {
@@ -134,14 +122,14 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	request_t pending_req;
 
 	/* get/update node_arra_idx */
-	int this_cpu_idx = per_cpu(node_array_idx, this_cpu);
-	per_cpu(node_array_idx, this_cpu) = (this_cpu_idx + 1) & INDEX_MASK;
+	int this_cpu_idx = per_cpu_ptr(node_array, this_cpu)[0].idx++;
 
-	this_cpu = ENCODE_NEXT(this_cpu, this_cpu_idx);
+	this_cpu = ENCODE_NEXT(this_cpu, this_cpu_idx & INDEX_MASK);
 	next = GET_NEXT_NODE(node_array, this_cpu);
 
 	/* Wait for spinning thread */
-	while (READ_ONCE(next->refcount.counter));
+	while (READ_ONCE(next->refcount.counter))
+		cpu_relax();
 
 	next->req = NULL;
 	next->params = NULL;
@@ -161,14 +149,15 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	WRITE_ONCE(prev->next, next);
 
 	while (1) {
-		if (READ_ONCE(prev->status) & CC_STAT_LOCK)
+		status = READ_ONCE(prev->status);
+		if (status & CC_STAT_LOCK)
 			cpu_relax();
 		else 
 			break;
 	}
 
 	smp_rmb();
-	if (READ_ONCE(prev->status) & CC_STAT_DONE) {
+	if (status & CC_STAT_DONE) {
 		atomic_dec(&prev->refcount);
 		put_cpu();
 		return prev->ret;
@@ -182,18 +171,15 @@ retry:
 		next_pending = READ_ONCE(pending->next);
 
 		/* Branch prediction: which case is more profitable? */
-		if (next_pending == NULL) {
-			if (is_tail(pending, lock))
-				goto out;
-			else
-				goto retry;
-		}
+		if (next_pending == NULL)
+			goto out;
+
 		/* Keep ordering next -> (req, params)*/
 		smp_rmb();
 		pending_req = READ_ONCE(pending->req);
 
 		/* Preserve store order completed -> status -> next */
-		WRITE_ONCE(pending->ret, pending_req(pending->params));
+		WRITE_ONCE(pending->ret, pending_req(READ_ONCE(pending->params)));
 		WRITE_ONCE(pending->status, CC_STAT_DONE);
 		pending = next_pending;
 	}
@@ -206,9 +192,9 @@ out:
 }
 
 /* Dummy workload */
-DEFINE_SPINLOCK(dummy_spinlock);
-atomic_t dummy_lock __attribute__((aligned(L1_CACHE_BYTES))) = ATOMIC_INIT(0);
-int dummy_counter __attribute__((aligned(L1_CACHE_BYTES))) = 0;
+__attribute__((aligned(GVM_CACHE_BYTES))) DEFINE_SPINLOCK(dummy_spinlock);
+atomic_t dummy_lock __attribute__((aligned(GVM_CACHE_BYTES))) = ATOMIC_INIT(0);
+int dummy_counter __attribute__((aligned(GVM_CACHE_BYTES))) = 0;
 int cache_table[1024*4+1];
 void* dummy_increment(void* params)
 {
@@ -300,12 +286,12 @@ static ssize_t lb_quit(struct file *filp, const char __user *ubuf,
 			ld->quit = true;
 
 			smp_mb();
-			node = per_cpu(node_array, cpu);
+			node = per_cpu_ptr(node_array, cpu);
 			for (j=0; j<INDEX_SIZE; j++) {
 				node[j].status = CC_STAT_DONE;
 			}
 		}
-		per_cpu(node_array, 0)[0].status = 0;
+		per_cpu_ptr(node_array, 0)[0].status = 0;
 	}
 	(*ppos)++;
 	return cnt;
@@ -386,17 +372,17 @@ static int t_show(struct seq_file *m, void *v)
 	seq_printf(m, "dummy_lock: (%d, %d)\n",
 					DECODE_CPU(dummy_lock.counter), DECODE_IDX(dummy_lock.counter));
 	for_each_online_cpu(cpu) {
-		node = per_cpu(node_array, cpu);
-		idx = per_cpu(node_array_idx, cpu);
+		node = per_cpu_ptr(node_array, cpu);
+		idx = node[0].idx;
 		seq_printf(m, "Node idx: %d\n", idx);
 		seq_printf(m, "Node(%d, %d) {\n"
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
 						"\trefcount = %d,\n"
-						"\tNext %p\n"
+						"\tNext %px\n"
 #ifdef DEBUG
-						"\tPrev %p\n}\n",
+						"\tPrev %px\n}\n",
 #else
 						,
 #endif
@@ -416,9 +402,9 @@ static int t_show(struct seq_file *m, void *v)
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
 						"\trefcount = %d,\n"
-						"\tNext %p\n"
+						"\tNext %px\n"
 #ifdef DEBUG
-						"\tPrev %p\n}\n",
+						"\tPrev %px\n}\n",
 #else
 						,
 #endif
@@ -590,7 +576,7 @@ int test_thread(void *data)
 #ifdef BLOCK_IRQ
 	unsigned long flags;
 #endif
-	struct lb_info *lb_data = &per_cpu(*((struct lb_info *)data), cpu);
+	struct lb_info *lb_data = &per_cpu(lb_info_array, cpu);
 	unsigned long prev = 0, cur;
 	while(!READ_ONCE(thread_switch));
 
@@ -716,16 +702,16 @@ static int dump_cclock(void)
 		pr_err("(%d,%d)->", DECODE_CPU(tmp), DECODE_IDX(tmp));
 	}
 	for_each_online_cpu(cpu) {
-		node = per_cpu(node_array, cpu);
-		idx = per_cpu(node_array_idx, cpu);
+		node = per_cpu_ptr(node_array, cpu);
+		idx = node[0].idx;
 		pr_err("Node idx: %d\n", idx);
 		pr_err("Node(%d, %d) {\n"
 						"\treq = %pF,\n"
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
 						"\trefcount = %d,\n"
-						"\tNext %p\n"
-						"\tPrev %p\n}\n",
+						"\tNext %px\n"
+						"\tPrev %px\n}\n",
 						cpu, 0,
 						node[0].req, node[0].params,
 						node[0].status & CC_STAT_LOCK, 
@@ -739,8 +725,8 @@ static int dump_cclock(void)
 						"\tparams = %p,\n"
 						"\twait = %d, completed = %d,\n"
 						"\trefcount = %d,\n"
-						"\tNext %p\n"
-						"\tPrev %p\n}\n",
+						"\tNext %px\n"
+						"\tPrev %px\n}\n",
 						cpu, 0,
 						node[0].req, node[0].params,
 						node[0].status & CC_STAT_LOCK, 
@@ -758,7 +744,7 @@ static int dump_cclock(void)
 		}
 	}
 	dummy_lock.counter = 0;
-	per_cpu(node_array, 0)[0].status = 0;
+	per_cpu_ptr(node_array, 0)[0].status = 0;
 
 	BUG();
 	return 0;
@@ -767,9 +753,17 @@ static int dump_cclock(void)
 /* module init/exit */
 static int lock_benchmark_init(void)
 {
+	struct cc_node *tmp;
+	int cpu;
+
 	lb_debugfs_init();
 #ifdef DYNAMIC_PERCPU
-	node_array = (struct cc_node *)alloc_percpu(struct cc_node[INDEX_SIZE]);
+	node_array = __alloc_percpu(1<<13, 1<<12);
+	for_each_online_cpu(cpu) {
+		tmp = per_cpu_ptr(node_array, cpu);
+		tmp[0].idx = 1;
+
+	}
 #endif
 	return 0;
 }
@@ -786,13 +780,13 @@ static void lock_benchmark_exit(void)
 		ld->quit = true;
 
 		smp_mb();
-		node = per_cpu(node_array, cpu);
+		node = per_cpu_ptr(node_array, cpu);
 		for (j=0; j<INDEX_SIZE; j++) {
 			node[j].status = CC_STAT_DONE;
 		}
 	}
 #ifdef DYNAMIC_PERCPU
-	if (!node_array)
+	if (node_array)
 		free_percpu(node_array);
 #endif
 	lb_debugfs_exit();
