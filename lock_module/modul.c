@@ -3,6 +3,8 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/gfp.h>
+#include <linux/mm.h>
 #include <linux/types.h>
 #include <linux/percpu.h>
 #include <linux/threads.h>
@@ -57,6 +59,47 @@ static unsigned long perf_result[NR_BENCH/NR_SAMPLE];
 #define GVM_CACHE_BYTES		(1<<12)
 #define arch_lock_xchg(ptr, v)	__xchg_op((ptr), (v), xchg, "lock; ")
 
+/* NUMA awareness structure */
+struct cc_lock {
+	spinlock_t global_lock __attribute__((aligned(GVM_CACHE_BYTES)));
+	atomic_t *node_lock_array[MAX_NUMNODES] __attribute__((aligned(GVM_CACHE_BYTES)));
+} dummy_cclock;
+
+void init_cclock (struct cc_lock *cclock) {
+	int node;
+	int i;
+	struct page *page;
+
+	spin_lock_init(&cclock->global_lock);
+
+	for (i=0; i<MAX_NUMNODES; i++)
+		cclock->node_lock_array[i] = NULL;
+
+	for_each_node(node) {
+		page = alloc_pages_node(node, GFP_KERNEL| __GFP_ZERO, get_order(sizeof(struct cc_lock)));
+		cclock->node_lock_array[node] = (atomic_t *)page_to_virt(page);
+	}
+}
+
+void exit_cclock (struct cc_lock *cclock) {
+	int i;
+	atomic_t *node_lock;	
+
+	for (i=0; i<MAX_NUMNODES; i++) {
+		node_lock = cclock->node_lock_array[i];
+		if (node_lock)
+			free_pages((unsigned long)node_lock, 0);	
+	}
+}
+
+atomic_t *get_node_lock(struct cc_lock *lock, int cpu) {
+	int node;
+
+	node = cpu_to_node(cpu);
+	return lock->node_lock_array[node];	
+}
+
+
 static inline int atomic_lock_xchg(atomic_t *v, int new)
 {
 	int val;
@@ -84,7 +127,7 @@ struct cc_node {
 	atomic_t refcount;
 	int status;
 	void* ret;
-}__attribute__((aligned(GVM_CACHE_BYTES)));
+};
 
 #ifdef DYNAMIC_PERCPU
 struct cc_node __percpu *node_array __attribute__((aligned(GVM_CACHE_BYTES)));
@@ -110,19 +153,24 @@ static inline bool is_tail(struct cc_node *node, atomic_t *lock)
 	return tmp == node;
 }
 
-void* execute_cs(request_t req, void *params, atomic_t *lock)
+void* execute_cs(request_t req, void *params, struct cc_lock *lock)
 {
 	struct cc_node *prev, *pending;
 	struct cc_node *next_pending;
 	struct cc_node *next;
 	int counter = 0;
 	int status;
+	atomic_t *node_lock;
 	unsigned int this_cpu = get_cpu();
 	unsigned int prev_cpu;
 	request_t pending_req;
+	int this_cpu_idx;
+	
+	/* grab node lock */
+	node_lock = get_node_lock(lock, this_cpu);
 
 	/* get/update node_arra_idx */
-	int this_cpu_idx = per_cpu_ptr(node_array, this_cpu)[0].idx++;
+	this_cpu_idx = per_cpu_ptr(node_array, this_cpu)[0].idx++;
 
 	this_cpu = ENCODE_NEXT(this_cpu, this_cpu_idx & INDEX_MASK);
 	next = GET_NEXT_NODE(node_array, this_cpu);
@@ -137,8 +185,8 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 	next->status = CC_STAT_LOCK;
 	next->next = NULL;
 	smp_wmb();
-
-	prev_cpu = atomic_lock_xchg(lock, this_cpu);
+	
+	prev_cpu = atomic_lock_xchg(node_lock, this_cpu);
 	prev = GET_NEXT_NODE(node_array, prev_cpu);
 	/* request and parameter should be set. Then, next should be set */
 	prev->req = req;
@@ -165,9 +213,11 @@ void* execute_cs(request_t req, void *params, atomic_t *lock)
 
 	/* Success to get lock */
 	pending = prev;
+	
+	/* Get global lock */
+	spin_lock(&lock->global_lock);
 
 	while (counter++ < MAX_COMBINER_OPERATIONS*max_cpus) {
-retry:
 		next_pending = READ_ONCE(pending->next);
 
 		/* Branch prediction: which case is more profitable? */
@@ -184,6 +234,9 @@ retry:
 		pending = next_pending;
 	}
 out:
+	/* Release global lock */
+	spin_unlock(&lock->global_lock);
+
 	smp_wmb();
 	atomic_dec(&prev->refcount);
 	WRITE_ONCE(pending->status, 0);
@@ -242,7 +295,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li = &per_cpu(lb_info_array, cpu);
 			li->req = dummy_increment;
 			li->params = &dummy_counter;
-			li->lock = (void *)&dummy_lock;
+			li->lock = (void *)&dummy_cclock;
 			li->counter = nr_bench;
 			li->monitor = monitor_thread;
 			monitor_thread = false;
@@ -765,6 +818,7 @@ static int lock_benchmark_init(void)
 
 	}
 #endif
+	init_cclock(&dummy_cclock);
 	return 0;
 }
 
@@ -790,6 +844,7 @@ static void lock_benchmark_exit(void)
 		free_percpu(node_array);
 #endif
 	lb_debugfs_exit();
+	exit_cclock(&dummy_cclock);
 }
 module_init(lock_benchmark_init);
 module_exit(lock_benchmark_exit);
