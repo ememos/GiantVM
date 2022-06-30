@@ -33,10 +33,10 @@ MODULE_LICENSE("GPL");
 #define MAX_COMBINER_OPERATIONS 1
 
 #define MAX_CPU		16
-#define MAX_DELAY 	100
+#define MAX_DELAY 	1000
 
 static int max_cpus = 14;
-static int delay_time = 0;
+static int delay_time = 100;
 static int nr_bench = 500000<<1;
 static int thread_switch = 0;
 
@@ -68,6 +68,8 @@ struct cc_lock {
 void init_cclock (struct cc_lock *cclock) {
 	int node;
 	int i;
+	int cpu;
+	atomic_t *node_lock;
 	struct page *page;
 
 	spin_lock_init(&cclock->global_lock);
@@ -75,9 +77,18 @@ void init_cclock (struct cc_lock *cclock) {
 	for (i=0; i<MAX_NUMNODES; i++)
 		cclock->node_lock_array[i] = NULL;
 
-	for_each_node(node) {
+	for_each_node_state(node, N_MEMORY) {
+		printk("Node:%d", node);
 		page = alloc_pages_node(node, GFP_KERNEL| __GFP_ZERO, get_order(sizeof(struct cc_lock)));
-		cclock->node_lock_array[node] = (atomic_t *)page_to_virt(page);
+		node_lock = (atomic_t *)page_to_virt(page);
+		for_each_online_cpu(cpu) {
+			if (cpu_to_node(cpu)==node) {
+				node_lock->counter = ENCODE_NEXT(cpu, 0);
+				break;
+			}
+
+		}
+		cclock->node_lock_array[node] = node_lock;
 	}
 }
 
@@ -92,7 +103,7 @@ void exit_cclock (struct cc_lock *cclock) {
 	}
 }
 
-atomic_t *get_node_lock(struct cc_lock *lock, int cpu) {
+static inline atomic_t *get_node_lock(struct cc_lock *lock, int cpu) {
 	int node;
 
 	node = cpu_to_node(cpu);
@@ -127,7 +138,7 @@ struct cc_node {
 	atomic_t refcount;
 	int status;
 	void* ret;
-};
+} __attribute__((aligned(GVM_CACHE_BYTES)));
 
 #ifdef DYNAMIC_PERCPU
 struct cc_node __percpu *node_array __attribute__((aligned(GVM_CACHE_BYTES)));
@@ -165,6 +176,7 @@ void* execute_cs(request_t req, void *params, struct cc_lock *lock)
 	unsigned int prev_cpu;
 	request_t pending_req;
 	int this_cpu_idx;
+	int i;
 	
 	/* grab node lock */
 	node_lock = get_node_lock(lock, this_cpu);
@@ -215,7 +227,11 @@ void* execute_cs(request_t req, void *params, struct cc_lock *lock)
 	pending = prev;
 	
 	/* Get global lock */
-	spin_lock(&lock->global_lock);
+retry:
+	if (!spin_trylock(&lock->global_lock)) {
+		udelay(delay_time);
+		goto retry;
+	}
 
 	while (counter++ < MAX_COMBINER_OPERATIONS*max_cpus) {
 		next_pending = READ_ONCE(pending->next);
@@ -418,12 +434,17 @@ static void t_stop(struct seq_file *m, void *v)
 
 static int t_show(struct seq_file *m, void *v)
 {
-	int cpu, idx;
+	int cpu, idx, nid;
 	struct cc_node *node;
 
 	seq_printf(m, "<Node_array information>\n");
-	seq_printf(m, "dummy_lock: (%d, %d)\n",
-					DECODE_CPU(dummy_lock.counter), DECODE_IDX(dummy_lock.counter));
+
+	for_each_node_state(nid, N_MEMORY) {
+		seq_printf(m, "node_lock[%d]: (%d, %d)\n",
+					nid, DECODE_CPU(dummy_cclock.node_lock_array[nid]->counter),
+					DECODE_IDX(dummy_cclock.node_lock_array[nid]->counter));
+	}
+
 	for_each_online_cpu(cpu) {
 		node = per_cpu_ptr(node_array, cpu);
 		idx = node[0].idx;
@@ -462,14 +483,14 @@ static int t_show(struct seq_file *m, void *v)
 						,
 #endif
 						cpu, 0,
-						node[0].req, node[0].params,
-						node[0].status & CC_STAT_LOCK,
-						node[0].status & CC_STAT_DONE,
-						node[0].refcount.counter,
-						node[0].next
+						node[1].req, node[1].params,
+						node[1].status & CC_STAT_LOCK,
+						node[1].status & CC_STAT_DONE,
+						node[1].refcount.counter,
+						node[1].next
 #ifdef DEBUG
 						,
-						node[0].prev,
+						node[1].prev,
 #endif
 						);
 	}
@@ -636,7 +657,7 @@ int test_thread(void *data)
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
 	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit);i++) {
-		if (unlikely(lb_data->monitor && i && (i%1000==0))) {
+		if (unlikely(lb_data->monitor && i && (i%NR_SAMPLE==0))) {
 			cur = sched_clock();
 			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
 			prev = cur;
@@ -661,38 +682,43 @@ int test_thread(void *data)
 	put_cpu();
 	return 0;
 }
+static inline void profile_spin(spinlock_t *lock, struct lb_info * lb_data) {
+#ifdef BLOCK_IRQ
+	unsigned long flags;
+#endif
 
+#ifdef BLOCK_IRQ
+	spin_lock_irqsave(lock, flags);
+#else
+	spin_lock(lock);
+#endif
+	lb_data->req(lb_data->params);
+#ifdef BLOCK_IRQ
+	spin_unlock_irqrestore(lock, flags);
+#else
+	spin_unlock(lock);
+#endif
+
+}
 int test_thread2(void *data)
 {
 	int i;
 	int cpu = get_cpu();
 	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
 	unsigned long prev = 0, cur = 0;
-#ifdef BLOCK_IRQ
-	unsigned long flags;
-#endif
+
 	spinlock_t *lock = (spinlock_t *)lb_data->lock;
 	while(!READ_ONCE(thread_switch));
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
 	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
-		if (unlikely(lb_data->monitor && i && (i%1000==0))) {
+		if (unlikely(lb_data->monitor && i && (i%NR_SAMPLE==0))) {
 			cur = sched_clock();
 			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
 			prev = cur;
 		}
-#ifdef BLOCK_IRQ
-		spin_lock_irqsave(lock, flags);
-#else
-		spin_lock(lock);
-#endif
-		lb_data->req(lb_data->params);
-#ifdef BLOCK_IRQ
-		spin_unlock_irqrestore(lock, flags);
-#else
-		spin_unlock(lock);
-#endif
+		profile_spin(lock, lb_data);
 	}
 
 	if (unlikely(lb_data->monitor)) {
@@ -815,7 +841,6 @@ static int lock_benchmark_init(void)
 	for_each_online_cpu(cpu) {
 		tmp = per_cpu_ptr(node_array, cpu);
 		tmp[0].idx = 1;
-
 	}
 #endif
 	init_cclock(&dummy_cclock);
