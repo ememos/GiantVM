@@ -19,6 +19,7 @@
 #include <asm/processor.h>
 #include <asm/barrier.h>
 #include <asm/cmpxchg.h>
+#include "list_bench.h"
 
 MODULE_DESCRIPTION("Simple Lock benchmark module");
 MODULE_AUTHOR("Wonhyuk Yang");
@@ -32,10 +33,10 @@ MODULE_LICENSE("GPL");
 
 #define MAX_COMBINER_OPERATIONS 1
 
-#define MAX_CPU		16
-#define MAX_DELAY 	1000
+#define MAX_CPU		32
+#define MAX_DELAY 	10000
 
-static int max_cpus = 14;
+static int max_cpus = 31;
 static int delay_time = 100;
 static int nr_bench = 500000<<1;
 static int thread_switch = 0;
@@ -124,8 +125,10 @@ typedef void* (*request_t)(void *);
 typedef int (*test_thread_t)(void *);
 
 int prepare_tests(test_thread_t, void *, const char *);
-int test_thread(void *data);
-int test_thread2(void *data);
+int cclock_bench(void *data);
+int spinlock_bench(void *data);
+int cclist_bench(void *data);
+int spinlist_bench(void *data);
 
 #define CC_STAT_LOCK	(1<<0)
 #define CC_STAT_DONE	(1<<1)
@@ -278,6 +281,7 @@ void* dummy_increment(void* params)
 	return params;
 }
 
+
 /* Debugfs */
 static int
 lb_open(struct inode *inode, struct file *filep)
@@ -313,10 +317,9 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->lock = (void *)&dummy_cclock;
 			li->counter = nr_bench;
 			li->monitor = monitor_thread;
-			li->quit = false;
 			monitor_thread = false;
 		}
-		prepare_tests(test_thread, (void *)&lb_info_array, "cc-lockbench");
+		prepare_tests(cclock_bench, (void *)&lb_info_array, "cc-lockbench");
 	} else if (val == 2) {
 		for_each_online_cpu(cpu) {
 			li = &per_cpu(lb_info_array, cpu);
@@ -325,11 +328,30 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->lock = (void *)&dummy_spinlock;
 			li->counter = nr_bench;
 			li->monitor = monitor_thread;
-			li->quit = false;
 			monitor_thread = false;
 		}
-		prepare_tests(test_thread2, (void *)&lb_info_array, "spinlockbench");
+		prepare_tests(spinlock_bench, (void *)&lb_info_array, "spinlockbench");
 	}
+	else if (val == 3) {
+		for_each_online_cpu(cpu) {
+			li = &per_cpu(lb_info_array, cpu);
+			li->lock = (void *)&dummy_cclock;
+			li->counter = nr_bench;
+			li->monitor = monitor_thread;
+			monitor_thread = false;
+		}
+		prepare_tests(cclist_bench, (void *)&lb_info_array, "cc-list");
+	} else if (val == 4) {
+		for_each_online_cpu(cpu) {
+			li = &per_cpu(lb_info_array, cpu);
+			li->lock = (void *)&dummy_spinlock;
+			li->counter = nr_bench;
+			li->monitor = monitor_thread;
+			monitor_thread = false;
+		}
+		prepare_tests(spinlist_bench, (void *)&lb_info_array, "spin-list");
+	}
+
 	(*ppos)++;
 	udelay(1000);
 	WRITE_ONCE(thread_switch, 1);
@@ -378,7 +400,7 @@ static ssize_t lb_cpu(struct file *filp, const char __user *ubuf,
 	if (ret)
 		return ret;
 
-	if (val > 0 && val < 15)
+	if (val > 0 && val < MAX_CPU)
 		max_cpus = val;
 
 	(*ppos)++;
@@ -396,7 +418,7 @@ static ssize_t lb_bench(struct file *filp, const char __user *ubuf,
 	if (ret)
 		return ret;
 
-	if (val > 0 && val < NR_BENCH)
+	if (val > 0 && val <= NR_BENCH)
 		nr_bench = val;
 
 	(*ppos)++;
@@ -644,21 +666,20 @@ static int lb_debugfs_exit(void)
 	return 0;
 }
 
-int test_thread(void *data)
+int cclock_bench(void *data)
 {
-	int i, c;
+	int i;
 	int cpu = get_cpu();
 #ifdef BLOCK_IRQ
 	unsigned long flags;
 #endif
-	struct lb_info *ld;
 	struct lb_info *lb_data = &per_cpu(lb_info_array, cpu);
 	unsigned long prev = 0, cur;
 	while(!READ_ONCE(thread_switch));
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
-	for (i=0; (i<lb_data->counter || !lb_data->monitor) && !READ_ONCE(lb_data->quit); i++) {
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit);i++) {
 		if (unlikely(lb_data->monitor && i && (i%NR_SAMPLE==0))) {
 			cur = sched_clock();
 			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
@@ -676,10 +697,6 @@ int test_thread(void *data)
 	if (unlikely(lb_data->monitor)) {
 		cur = sched_clock();
 		perf_result[(i+NR_SAMPLE-1)/NR_SAMPLE-1] = cur-prev;
-		for_each_online_cpu(c) {
-			ld = &per_cpu(lb_info_array, c);
-			ld->quit = true;
-		}
 		for (i=0;i<lb_data->counter;i+=NR_SAMPLE)
 			printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, perf_result[i/NR_SAMPLE]);
 	}
@@ -706,12 +723,12 @@ static inline void profile_spin(spinlock_t *lock, struct lb_info * lb_data) {
 #endif
 
 }
-int test_thread2(void *data)
+
+int spinlock_bench(void *data)
 {
-	int i, c;
+	int i;
 	int cpu = get_cpu();
-	struct lb_info *ld;
-	struct lb_info *lb_data = &per_cpu(*((struct lb_info *)data), cpu);
+	struct lb_info * lb_data = &per_cpu(*((struct lb_info *)data), cpu);
 	unsigned long prev = 0, cur = 0;
 
 	spinlock_t *lock = (spinlock_t *)lb_data->lock;
@@ -719,7 +736,7 @@ int test_thread2(void *data)
 
 	if (unlikely(lb_data->monitor))
 		prev = sched_clock();
-	for (i=0; (i<lb_data->counter || !lb_data->monitor) && !READ_ONCE(lb_data->quit); i++) {
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit); i++) {
 		if (unlikely(lb_data->monitor && i && (i%NR_SAMPLE==0))) {
 			cur = sched_clock();
 			perf_result[(i/NR_SAMPLE)-1] = cur-prev;
@@ -731,16 +748,110 @@ int test_thread2(void *data)
 	if (unlikely(lb_data->monitor)) {
 		cur = sched_clock();
 		perf_result[(i+NR_SAMPLE-1)/NR_SAMPLE-1] = cur-prev;
-		for_each_online_cpu(c) {
-			ld = &per_cpu(lb_info_array, c);
-			ld->quit = true;
-		}
-
 		for (i=0;i<lb_data->counter;i+=NR_SAMPLE)
 			printk("lockbench: <spinlock> monitor thread %dth [%lu]\n", i, perf_result[i/NR_SAMPLE]);
-
 	}
 
+	per_cpu(task_array, cpu) = NULL;
+	put_cpu();
+	return 0;
+}
+
+int cclist_bench(void *data)
+{
+	int i, j;
+	int cpu = get_cpu();
+	unsigned long flags;
+	struct lb_info *lb_data = &per_cpu(lb_info_array, cpu);
+	struct list_head *list_node = kmalloc(sizeof(struct list_head)*LIST_LEN, GFP_KERNEL);
+	struct list_param param;
+	unsigned long prev = 0, cur;
+	while(!READ_ONCE(thread_switch));
+
+	if (unlikely(lb_data->monitor))
+		prev = sched_clock();
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit);i++) {
+		if (unlikely(lb_data->monitor && i)) {
+			cur = sched_clock();
+			perf_result[i] = cur-prev;
+			prev = cur;
+		}
+
+		param.arg[1] = &cc_head;
+		for(j=0;j<LIST_LEN;j++) {
+			param.arg[0] = list_node+j;
+
+			local_irq_save(flags);
+			execute_cs(cc_list_add, &param, lb_data->lock);
+			local_irq_restore(flags);
+			udelay(5);
+		}
+
+		for(j=0;j<LIST_LEN;j++) {
+			param.arg[0] = list_node+j;
+
+			local_irq_save(flags);
+			execute_cs(cc_list_del, &param, lb_data->lock);
+			local_irq_restore(flags);
+			udelay(5);
+		}
+	}
+
+	if (unlikely(lb_data->monitor)) {
+		cur = sched_clock();
+		perf_result[i] = cur-prev;
+		for (i=0;i<lb_data->counter;i++)
+			printk("lockbench: <cc-lock> monitor thread %dth [%lu]\n", i, perf_result[i]);
+	}
+	kfree(list_node);
+	per_cpu(task_array, cpu) = NULL;
+	put_cpu();
+	return 0;
+}
+
+int spinlist_bench(void *data)
+{
+	int i, j;
+	int cpu = get_cpu();
+	unsigned long flags;
+	struct lb_info *lb_data = &per_cpu(lb_info_array, cpu);
+	spinlock_t *lock = (spinlock_t *)lb_data->lock;
+	
+	struct list_head *list_node = kmalloc(sizeof(struct list_head)*LIST_LEN, GFP_KERNEL);
+	unsigned long prev = 0, cur;
+	while(!READ_ONCE(thread_switch));
+
+	if (unlikely(lb_data->monitor))
+		prev = sched_clock();
+	for (i=0; i<lb_data->counter && !READ_ONCE(lb_data->quit);i++) {
+		if (unlikely(lb_data->monitor && i)) {
+			cur = sched_clock();
+			perf_result[i] = cur-prev;
+			prev = cur;
+		}
+
+		for(j=0;j<LIST_LEN;j++) {
+			spin_lock_irqsave(lock, flags);
+			list_add(list_node+j, &spin_head);
+			spin_unlock_irqrestore(lock, flags);
+			udelay(5);
+		}
+
+		for(j=0;j<LIST_LEN;j++) {
+			spin_lock_irqsave(lock, flags);
+			list_del(list_node+j);
+			spin_unlock_irqrestore(lock, flags);
+			udelay(5);
+		}
+	}
+
+	if (unlikely(lb_data->monitor)) {
+		cur = sched_clock();
+		perf_result[i] = cur-prev;
+		for (i=0;i<lb_data->counter;i++)
+			printk("lockbench: <spin-lock> monitor thread %dth [%lu]\n", i, perf_result[i]);
+	}
+	kfree(list_node);
 	per_cpu(task_array, cpu) = NULL;
 	put_cpu();
 	return 0;
