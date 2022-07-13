@@ -125,10 +125,10 @@ typedef void* (*request_t)(void *);
 typedef int (*test_thread_t)(void *);
 
 int prepare_tests(test_thread_t, void *, const char *);
-int test_thread(void *data);
-int test_thread2(void *data);
-int list_bench(void *data);
-int list_bench2(void *data);
+int cclock_bench(void *data);
+int spinlock_bench(void *data);
+int cclist_bench(void *data);
+int spinlist_bench(void *data);
 
 #define CC_STAT_LOCK	(1<<0)
 #define CC_STAT_DONE	(1<<1)
@@ -319,7 +319,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
-		prepare_tests(test_thread, (void *)&lb_info_array, "cc-lockbench");
+		prepare_tests(cclock_bench, (void *)&lb_info_array, "cc-lockbench");
 	} else if (val == 2) {
 		for_each_online_cpu(cpu) {
 			li = &per_cpu(lb_info_array, cpu);
@@ -330,7 +330,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
-		prepare_tests(test_thread2, (void *)&lb_info_array, "spinlockbench");
+		prepare_tests(spinlock_bench, (void *)&lb_info_array, "spinlockbench");
 	}
 	else if (val == 3) {
 		for_each_online_cpu(cpu) {
@@ -340,7 +340,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
-		prepare_tests(list_bench, (void *)&lb_info_array, "cc-list");
+		prepare_tests(cclist_bench, (void *)&lb_info_array, "cc-list");
 	} else if (val == 4) {
 		for_each_online_cpu(cpu) {
 			li = &per_cpu(lb_info_array, cpu);
@@ -349,7 +349,7 @@ static ssize_t lb_write(struct file *filp, const char __user *ubuf,
 			li->monitor = monitor_thread;
 			monitor_thread = false;
 		}
-		prepare_tests(list_bench2, (void *)&lb_info_array, "spin-list");
+		prepare_tests(spinlist_bench, (void *)&lb_info_array, "spin-list");
 	}
 
 	(*ppos)++;
@@ -666,7 +666,7 @@ static int lb_debugfs_exit(void)
 	return 0;
 }
 
-int test_thread(void *data)
+int cclock_bench(void *data)
 {
 	int i;
 	int cpu = get_cpu();
@@ -723,7 +723,8 @@ static inline void profile_spin(spinlock_t *lock, struct lb_info * lb_data) {
 #endif
 
 }
-int test_thread2(void *data)
+
+int spinlock_bench(void *data)
 {
 	int i;
 	int cpu = get_cpu();
@@ -756,7 +757,7 @@ int test_thread2(void *data)
 	return 0;
 }
 
-int list_bench(void *data)
+int cclist_bench(void *data)
 {
 	int i, j;
 	int cpu = get_cpu();
@@ -808,7 +809,7 @@ int list_bench(void *data)
 	return 0;
 }
 
-int list_bench2(void *data)
+int spinlist_bench(void *data)
 {
 	int i, j;
 	int cpu = get_cpu();
