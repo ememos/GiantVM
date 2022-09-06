@@ -4344,6 +4344,8 @@ int main(int argc, char **argv, char **envp)
     }
     printf("]\n");
 
+    start_io_router();
+
     machine_class->max_cpus = machine_class->max_cpus ?: 1; /* Default to UP */
     if (max_cpus > machine_class->max_cpus) {
         error_report("Number of SMP CPUs requested (%d) exceeds max CPUs "
@@ -4847,8 +4849,6 @@ int main(int argc, char **argv, char **envp)
         dump_vmstate_json_to_file(vmstate_dump_file);
         return 0;
     }
-
-    start_io_router();
 
     if (incoming) {
         Error *local_err = NULL;
